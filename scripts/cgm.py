@@ -761,13 +761,21 @@ def _identify_regressions(deltas):
 
 
 def get_current_glucose():
-    """Get the most recent glucose reading from Nightscout."""
+    """Get the most recent glucose reading from Nightscout.
+    
+    Also kicks off a background cache refresh (last 1 day) so follow-up
+    analytical queries have fresh local data ready.
+    """
     try:
         resp = requests.get(API_BASE, params={"count": 1}, timeout=10)
         resp.raise_for_status()
         data = resp.json()
     except requests.RequestException as e:
         return {"error": f"Failed to fetch current glucose: {e}"}
+
+    # Background cache refresh so follow-up queries have fresh data
+    import threading
+    threading.Thread(target=fetch_and_store, args=(1,), daemon=True).start()
 
     if data:
         e = data[0]
