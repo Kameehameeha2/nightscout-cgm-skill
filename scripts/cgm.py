@@ -77,7 +77,13 @@ def get_nightscout_settings():
     return _cached_settings
 
 def use_mmol():
-    """Check if Nightscout is configured for mmol/L."""
+    """Check if display units should be mmol/L.
+
+    Checks DISPLAY_UNITS env var first, then falls back to Nightscout server settings.
+    """
+    env_units = os.environ.get("DISPLAY_UNITS")
+    if env_units:
+        return env_units.lower().startswith("mmol")
     units = get_nightscout_settings().get("units", "mg/dl")
     return units.lower().startswith("mmol")
 
