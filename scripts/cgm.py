@@ -77,7 +77,13 @@ def get_nightscout_settings():
     return _cached_settings
 
 def use_mmol():
-    """Check if Nightscout is configured for mmol/L."""
+    """Check if display units should be mmol/L.
+
+    Checks DISPLAY_UNITS env var first, then falls back to Nightscout server settings.
+    """
+    env_units = os.environ.get("DISPLAY_UNITS")
+    if env_units:
+        return env_units.lower().startswith("mmol")
     units = get_nightscout_settings().get("units", "mg/dl")
     return units.lower().startswith("mmol")
 
@@ -86,6 +92,24 @@ def convert_glucose(value_mgdl):
     if use_mmol():
         return round(value_mgdl / 18.0182, 1)
     return value_mgdl
+
+def convert_profile_glucose(value, profile_units):
+    """Convert a glucose value from profile units to display units.
+
+    Profile data is stored in the Nightscout instance's configured units,
+    not necessarily mg/dL. This handles the conversion correctly.
+    """
+    profile_is_mmol = profile_units.lower().startswith("mmol")
+    display_is_mmol = use_mmol()
+    if profile_is_mmol == display_is_mmol:
+        # Same units, no conversion needed
+        return round(value, 1) if display_is_mmol else value
+    elif profile_is_mmol and not display_is_mmol:
+        # Profile in mmol/L, display in mg/dL
+        return round(value * 18.0182)
+    else:
+        # Profile in mg/dL, display in mmol/L
+        return round(value / 18.0182, 1)
 
 def get_unit_label():
     """Get the appropriate unit label based on Nightscout settings."""
@@ -5858,11 +5882,13 @@ def get_profile():
         # Find the default/active profile
         default_profile = store.get("Default") or store.get(list(store.keys())[0]) if store else {}
         
+        profile_units = default_profile.get("units") or profile.get("units") or "mg/dL"
+
         result = {
-            "units": profile.get("units", default_profile.get("units", "mg/dL")),
+            "units": get_unit_label(),
             "dia": default_profile.get("dia", 6),  # Duration of Insulin Action
         }
-        
+
         # Basal rates
         basal = default_profile.get("basal", [])
         if basal:
@@ -5892,7 +5918,7 @@ def get_profile():
             result["isf"] = [
                 {
                     "time": s.get("time"),
-                    "value": convert_glucose(s.get("value", 0)),
+                    "value": convert_profile_glucose(s.get("value", 0), profile_units),
                     "unit": f"{get_unit_label()}/U"
                 }
                 for s in sens
@@ -5919,8 +5945,8 @@ def get_profile():
                 high_val = target_high[i].get("value") if i < len(target_high) else low.get("value")
                 result["targets"].append({
                     "time": low.get("time"),
-                    "low": convert_glucose(low.get("value", 70)),
-                    "high": convert_glucose(high_val or 180),
+                    "low": convert_profile_glucose(low.get("value", 70), profile_units),
+                    "high": convert_profile_glucose(high_val or 180, profile_units),
                     "unit": get_unit_label()
                 })
         
@@ -5929,7 +5955,7 @@ def get_profile():
         if loop_settings:
             result["loop_settings"] = {
                 "maximum_bolus": loop_settings.get("maximumBolus"),
-                "minimum_bg_guard": convert_glucose(loop_settings.get("minimumBGGuard", 0)) if loop_settings.get("minimumBGGuard") else None,
+                "minimum_bg_guard": convert_profile_glucose(loop_settings.get("minimumBGGuard", 0), profile_units) if loop_settings.get("minimumBGGuard") else None,
                 "dosing_enabled": loop_settings.get("dosingEnabled"),
             }
             
@@ -5937,8 +5963,8 @@ def get_profile():
             pre_meal = loop_settings.get("preMealTargetRange", [])
             if pre_meal and len(pre_meal) >= 2:
                 result["loop_settings"]["pre_meal_target"] = {
-                    "low": convert_glucose(pre_meal[0]),
-                    "high": convert_glucose(pre_meal[1]),
+                    "low": convert_profile_glucose(pre_meal[0], profile_units),
+                    "high": convert_profile_glucose(pre_meal[1], profile_units),
                     "unit": get_unit_label()
                 }
             
@@ -5952,8 +5978,8 @@ def get_profile():
                         "duration_minutes": p.get("duration", 0) // 60 if p.get("duration") else None,
                         "insulin_needs_scale": p.get("insulinNeedsScaleFactor"),
                         "target_range": [
-                            convert_glucose(p["targetRange"][0]),
-                            convert_glucose(p["targetRange"][1])
+                            convert_profile_glucose(p["targetRange"][0], profile_units),
+                            convert_profile_glucose(p["targetRange"][1], profile_units)
                         ] if p.get("targetRange") else None
                     }
                     for p in presets
