@@ -83,6 +83,51 @@ class TestEnsureData:
                 assert result is False
 
 
+class TestEnsureFreshData:
+    """Tests for refresh-on-query behavior."""
+
+    def test_auto_syncs_when_data_is_stale(self, cgm_module, temp_db, tmp_path):
+        """Should fetch before queries when newest local reading is stale."""
+        old_dt = datetime.now(timezone.utc) - timedelta(hours=2)
+        conn = sqlite3.connect(temp_db)
+        conn.execute(
+            "INSERT INTO readings (id, sgv, date_ms, date_string, trend, direction, device) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("old", 120, int(old_dt.timestamp() * 1000), old_dt.isoformat(), 5, "Flat", "test")
+        )
+        conn.commit()
+        conn.close()
+
+        with patch.object(cgm_module, "DB_PATH", temp_db):
+            with patch.object(cgm_module, "CONFIG_PATH", tmp_path / "config.json"):
+                with patch.object(cgm_module, "fetch_and_store") as mock_fetch:
+                    mock_fetch.return_value = {"new_readings": 3, "total_readings": 4}
+
+                    result = cgm_module.ensure_fresh_data(days=7)
+
+        assert result is True
+        mock_fetch.assert_called_once_with(7)
+
+    def test_does_not_sync_when_auto_refresh_disabled(self, cgm_module, temp_db, tmp_path):
+        """Disabled refresh-on-query should use existing local data."""
+        old_dt = datetime.now(timezone.utc) - timedelta(hours=2)
+        conn = sqlite3.connect(temp_db)
+        conn.execute(
+            "INSERT INTO readings (id, sgv, date_ms, date_string, trend, direction, device) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("old", 120, int(old_dt.timestamp() * 1000), old_dt.isoformat(), 5, "Flat", "test")
+        )
+        conn.commit()
+        conn.close()
+
+        with patch.object(cgm_module, "DB_PATH", temp_db):
+            with patch.object(cgm_module, "CONFIG_PATH", tmp_path / "config.json"):
+                cgm_module.set_auto_refresh(enabled=False)
+                with patch.object(cgm_module, "fetch_and_store") as mock_fetch:
+                    result = cgm_module.ensure_fresh_data(days=7)
+
+        assert result is True
+        mock_fetch.assert_not_called()
+
+
 class TestFetchAndStore:
     """Tests for fetch_and_store function."""
     

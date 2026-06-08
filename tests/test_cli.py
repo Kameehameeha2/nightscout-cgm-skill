@@ -57,6 +57,27 @@ class TestMainArgumentParsing:
                     except SystemExit:
                         pass
                     mock_fetch.assert_called_once()
+
+    def test_auto_refresh_set_and_off_commands(self, cgm_module, tmp_path):
+        """'auto-refresh set' and 'off' should update refresh-on-query config."""
+        config_path = tmp_path / "config.json"
+
+        with patch.object(cgm_module, "CONFIG_PATH", config_path):
+            with patch.object(sys, "argv", ["cgm.py", "auto-refresh", "set", "--minutes", "15"]):
+                with patch("builtins.print"):
+                    cgm_module.main()
+
+            settings = cgm_module.get_auto_refresh_settings()
+            assert settings["enabled"] is True
+            assert settings["minutes"] == 15
+
+            with patch.object(sys, "argv", ["cgm.py", "auto-refresh", "off"]):
+                with patch("builtins.print"):
+                    cgm_module.main()
+
+            settings = cgm_module.get_auto_refresh_settings()
+            assert settings["enabled"] is False
+            assert settings["minutes"] == 15
     
     def test_patterns_command(self, cgm_module):
         """'patterns' command should work."""
@@ -102,6 +123,38 @@ class TestMainArgumentParsing:
                     assert call_kwargs[1]["day_of_week"] == "Tuesday"
                     assert call_kwargs[1]["hour_start"] == 11
                     assert call_kwargs[1]["hour_end"] == 14
+
+    def test_goals_view_command(self, cgm_module, tmp_path):
+        """'goals view' should return configured goals."""
+        with patch.object(cgm_module, "CONFIG_PATH", tmp_path / "config.json"):
+            with patch.object(sys, "argv", ["cgm.py", "goals", "view"]):
+                with patch("builtins.print") as mock_print:
+                    cgm_module.main()
+
+        printed = mock_print.call_args[0][0]
+        assert "average_glucose" in printed
+        assert "70.0" in printed
+
+    def test_goals_set_and_clear_commands(self, cgm_module, tmp_path):
+        """'goals set' and 'goals clear' should update config-backed goals."""
+        config_path = tmp_path / "config.json"
+
+        with patch.object(cgm_module, "CONFIG_PATH", config_path):
+            with patch.object(sys, "argv", ["cgm.py", "goals", "set", "--tir", "75", "--cv", "34"]):
+                with patch("builtins.print"):
+                    cgm_module.main()
+
+            goals = cgm_module.get_goals()
+            assert goals["tir"] == 75.0
+            assert goals["cv"] == 34.0
+
+            with patch.object(sys, "argv", ["cgm.py", "goals", "clear"]):
+                with patch("builtins.print"):
+                    cgm_module.main()
+
+            goals = cgm_module.get_goals()
+            assert goals["tir"] == cgm_module.DEFAULT_GOALS["tir"]
+            assert goals["cv"] == cgm_module.DEFAULT_GOALS["cv"]
 
 
 class TestDayCommand:

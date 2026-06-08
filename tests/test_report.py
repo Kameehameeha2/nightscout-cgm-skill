@@ -79,6 +79,8 @@ class TestGenerateHtmlReport:
         assert "Day of Week" in content
         assert "Heatmap" in content
         assert "GMI" in content or "A1C" in content
+        assert "Executive Summary" in content
+        assert "Goal Tracking" in content
     
     def test_returns_correct_result_structure(self, cgm_module, populated_db, tmp_path):
         """Result should have expected fields."""
@@ -194,6 +196,101 @@ class TestGenerateHtmlReport:
         
         assert result["days_analyzed"] == 30
 
+    def test_executive_summary_stable_status(self, cgm_module):
+        """Executive summary should produce deterministic stable wording."""
+        summary = cgm_module.build_executive_summary(
+            {"very_low": 0, "low": 1, "in_range": 82, "high": 15, "very_high": 2},
+            cv=31.5,
+            alerts=[]
+        )
+
+        assert summary["severity"] == "good"
+        assert summary["status"] == "Glucose profile is stable for this period"
+        assert len(summary["bullets"]) == 3
+        assert "Time in range is 82.0%" in summary["bullets"][0]
+
+    def test_executive_summary_warns_on_low_time(self, cgm_module):
+        """Time below range should take precedence in the summary."""
+        summary = cgm_module.build_executive_summary(
+            {"very_low": 1, "low": 5, "in_range": 76, "high": 17, "very_high": 1},
+            cv=32,
+            alerts=[]
+        )
+
+        assert summary["severity"] == "warning"
+        assert summary["status"] == "Time below range needs attention"
+        assert "Time below range is 6.0%" in summary["bullets"][1]
+
+    def test_goal_status_cards(self, cgm_module):
+        """Goal status should classify met and missed goals."""
+        goals = {"tir": 70.0, "cv": 36.0, "gmi": 7.0, "average_glucose": 154.0}
+
+        status = cgm_module.build_goal_status(
+            tir_pct=72.5,
+            cv=38.0,
+            gmi=6.9,
+            average_glucose_mgdl=150,
+            goals=goals
+        )
+
+        assert status[0]["label"] == "Time in Range"
+        assert status[0]["met"] is True
+        assert status[1]["label"] == "Glucose Variability"
+        assert status[1]["met"] is False
+
+    def test_html_contains_executive_summary_bullets(self, cgm_module, populated_db, tmp_path):
+        """Generated report should include the executive summary block."""
+        output_path = tmp_path / "test_report.html"
+
+        with patch.object(cgm_module, "DB_PATH", populated_db):
+            with patch.object(cgm_module, "ensure_data", return_value=True):
+                with patch.object(cgm_module, "use_mmol", return_value=False):
+                    with patch.object(cgm_module, "get_thresholds", return_value={
+                        "urgent_low": 55, "target_low": 70,
+                        "target_high": 180, "urgent_high": 250
+                    }):
+                        cgm_module.generate_html_report(
+                            days=7,
+                            output_path=str(output_path)
+                        )
+
+        content = output_path.read_text(encoding="utf-8")
+
+        assert 'class="executive-summary' in content
+        assert 'id="executiveSummaryHeading"' in content
+        assert "Time in range is" in content
+        assert "Time below range is" in content
+
+    def test_html_contains_goal_tracking(self, cgm_module, populated_db, tmp_path):
+        """Generated report should include goal tracking cards."""
+        output_path = tmp_path / "test_report.html"
+
+        with patch.object(cgm_module, "DB_PATH", populated_db):
+            with patch.object(cgm_module, "ensure_data", return_value=True):
+                with patch.object(cgm_module, "use_mmol", return_value=False):
+                    with patch.object(cgm_module, "get_thresholds", return_value={
+                        "urgent_low": 55, "target_low": 70,
+                        "target_high": 180, "urgent_high": 250
+                    }):
+                        with patch.object(cgm_module, "get_goals", return_value={
+                            "tir": 75.0,
+                            "cv": 34.0,
+                            "gmi": 6.8,
+                            "average_glucose": 145.0
+                        }):
+                            cgm_module.generate_html_report(
+                                days=7,
+                                output_path=str(output_path)
+                            )
+
+        content = output_path.read_text(encoding="utf-8")
+
+        assert 'class="goals-section"' in content
+        assert "Goal Tracking" in content
+        assert "Time in Range" in content
+        assert "Goal: &gt;=" not in content
+        assert "Goal: >=" in content
+
 
 class TestReportCharts:
     """Tests for specific chart data in the report."""
@@ -244,7 +341,31 @@ class TestReportCharts:
         assert "median" in content
         assert "p10" in content
         assert "p90" in content
-    
+
+    def test_modal_day_has_target_range_lines(self, cgm_module, populated_db, tmp_path):
+        """Modal day chart should render target range boundary lines."""
+        output_path = tmp_path / "test_report.html"
+
+        with patch.object(cgm_module, "DB_PATH", populated_db):
+            with patch.object(cgm_module, "ensure_data", return_value=True):
+                with patch.object(cgm_module, "use_mmol", return_value=False):
+                    with patch.object(cgm_module, "get_thresholds", return_value={
+                        "urgent_low": 55, "target_low": 70,
+                        "target_high": 180, "urgent_high": 250
+                    }):
+                        cgm_module.generate_html_report(
+                            days=7,
+                            output_path=str(output_path)
+                        )
+
+        content = output_path.read_text(encoding="utf-8")
+
+        assert "Target Low" in content
+        assert "Target High" in content
+        assert "modalTargetLow" in content
+        assert "modalTargetHigh" in content
+        assert "borderDash: [6, 4]" in content
+
     def test_heatmap_data(self, cgm_module, populated_db, tmp_path):
         """Heatmap should have 7 days × 24 hours of data."""
         output_path = tmp_path / "test_report.html"
@@ -266,6 +387,30 @@ class TestReportCharts:
         # Check for heatmap data
         assert "heatmapTir" in content
         assert "heatmapGrid" in content
+
+    def test_weekly_summary_has_context(self, cgm_module, populated_db, tmp_path):
+        """Weekly summary should include context cards with deltas and best day."""
+        output_path = tmp_path / "test_report.html"
+
+        with patch.object(cgm_module, "DB_PATH", populated_db):
+            with patch.object(cgm_module, "ensure_data", return_value=True):
+                with patch.object(cgm_module, "use_mmol", return_value=False):
+                    with patch.object(cgm_module, "get_thresholds", return_value={
+                        "urgent_low": 55, "target_low": 70,
+                        "target_high": 180, "urgent_high": 250
+                    }):
+                        cgm_module.generate_html_report(
+                            days=30,
+                            output_path=str(output_path)
+                        )
+
+        content = output_path.read_text(encoding="utf-8")
+
+        assert 'id="weeklyContext"' in content
+        assert "function renderWeeklyContext" in content
+        assert "best_day" in content
+        assert "tir_delta" in content
+        assert "Best day:" in content
 
 
 class TestReportCliCommand:
@@ -536,6 +681,31 @@ class TestReportHeatmapHover:
         assert "Good" in content  # Status indicator
         assert "Fair" in content
         assert "Needs work" in content
+
+    def test_section_navigation_present(self, cgm_module, populated_db, tmp_path):
+        """Report should include sticky section navigation for long reports."""
+        output_path = tmp_path / "test_report.html"
+
+        with patch.object(cgm_module, "DB_PATH", populated_db):
+            with patch.object(cgm_module, "ensure_data", return_value=True):
+                with patch.object(cgm_module, "use_mmol", return_value=False):
+                    with patch.object(cgm_module, "get_thresholds", return_value={
+                        "urgent_low": 55, "target_low": 70,
+                        "target_high": 180, "urgent_high": 250
+                    }):
+                        cgm_module.generate_html_report(
+                            days=7,
+                            output_path=str(output_path)
+                        )
+
+        content = output_path.read_text(encoding="utf-8")
+
+        assert 'class="section-nav"' in content
+        assert 'href="#section-summary"' in content
+        assert 'href="#section-modal-day"' in content
+        assert 'id="section-alerts"' in content
+        assert 'id="section-weekly"' in content
+        assert "position: sticky" in content
 
 
 class TestReportCalculationFunctions:
@@ -825,7 +995,52 @@ class TestGenerateAgpReport:
         # Check for print media query
         assert "@media print" in content
         assert "no-print" in content
-    
+
+    def test_report_floating_actions_reserve_space(self, cgm_module, populated_db, tmp_path):
+        """Fixed report actions should avoid hiding content while scrolling."""
+        output_path = tmp_path / "test_report.html"
+
+        with patch.object(cgm_module, "DB_PATH", populated_db):
+            with patch.object(cgm_module, "ensure_data", return_value=True):
+                with patch.object(cgm_module, "use_mmol", return_value=False):
+                    with patch.object(cgm_module, "get_thresholds", return_value={
+                        "urgent_low": 55, "target_low": 70,
+                        "target_high": 180, "urgent_high": 250
+                    }):
+                        cgm_module.generate_html_report(
+                            days=7,
+                            output_path=str(output_path)
+                        )
+
+        content = output_path.read_text(encoding="utf-8")
+
+        assert 'class="report-actions"' in content
+        assert "padding-bottom: 96px" in content
+        assert "max-width: calc(100vw - 40px)" in content
+        assert ".report-actions" in content
+
+    def test_report_has_pdf_export_affordance(self, cgm_module, populated_db, tmp_path):
+        """Standard report should expose browser Print / Save PDF export."""
+        output_path = tmp_path / "test_report.html"
+
+        with patch.object(cgm_module, "DB_PATH", populated_db):
+            with patch.object(cgm_module, "ensure_data", return_value=True):
+                with patch.object(cgm_module, "use_mmol", return_value=False):
+                    with patch.object(cgm_module, "get_thresholds", return_value={
+                        "urgent_low": 55, "target_low": 70,
+                        "target_high": 180, "urgent_high": 250
+                    }):
+                        cgm_module.generate_html_report(
+                            days=7,
+                            output_path=str(output_path)
+                        )
+
+        content = output_path.read_text(encoding="utf-8")
+
+        assert "Print / Save PDF" in content
+        assert "window.print()" in content
+        assert "@media print" in content
+
     def test_agp_handles_empty_data(self, cgm_module, temp_db, tmp_path):
         """AGP should handle empty database gracefully."""
         output_path = tmp_path / "test_agp.html"

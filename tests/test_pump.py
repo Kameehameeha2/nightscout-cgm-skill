@@ -374,6 +374,193 @@ class TestGetTreatments:
         assert "find[created_at][$gte]" in str(call_args)
 
 
+class TestGetEventCorrelations:
+    """Tests for get_event_correlations() function."""
+
+    def test_event_correlations_match_tag(self, cgm_module, temp_db, mock_capabilities_with_pump):
+        """Should correlate matching Nightscout events with surrounding CGM data."""
+        cgm_module._pump_capabilities = mock_capabilities_with_pump
+        event_dt = datetime.now(timezone.utc) - timedelta(days=1)
+        readings = [
+            ("before1", 100, event_dt - timedelta(minutes=20)),
+            ("before2", 110, event_dt - timedelta(minutes=5)),
+            ("after1", 150, event_dt + timedelta(minutes=60)),
+            ("after2", 180, event_dt + timedelta(minutes=120)),
+        ]
+
+        import sqlite3
+        conn = sqlite3.connect(temp_db)
+        conn.executemany(
+            "INSERT INTO readings (id, sgv, date_ms, date_string, trend, direction, device) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (id_, sgv, int(dt.timestamp() * 1000), dt.isoformat(), 5, "Flat", "test")
+                for id_, sgv, dt in readings
+            ]
+        )
+        conn.commit()
+        conn.close()
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {
+                "eventType": "Meal Bolus",
+                "notes": "pizza dinner",
+                "carbs": 45,
+                "insulin": 5.5,
+                "created_at": event_dt.isoformat().replace("+00:00", "Z")
+            },
+            {
+                "eventType": "Note",
+                "notes": "coffee",
+                "created_at": event_dt.isoformat().replace("+00:00", "Z")
+            }
+        ]
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch.object(cgm_module, "DB_PATH", temp_db):
+            with patch.object(cgm_module, "ensure_fresh_data", return_value=True):
+                with patch("requests.get", return_value=mock_resp):
+                    result = cgm_module.get_event_correlations(tag="pizza", days=7)
+
+        assert "error" not in result
+        assert result["summary"]["matched_events"] == 1
+        assert result["events"][0]["notes"] == "pizza dinner"
+        assert result["events"][0]["baseline_average"] == 105.0
+        assert result["events"][0]["post_event_average"] == 165.0
+        assert result["events"][0]["delta"] == 60.0
+
+    def test_event_correlations_cgm_only(self, cgm_module, mock_capabilities_cgm_only):
+        """Should return helpful error for CGM-only users."""
+        cgm_module._pump_capabilities = mock_capabilities_cgm_only
+
+        result = cgm_module.get_event_correlations(tag="pizza")
+
+        assert "error" in result
+        assert result["cgm_only"] is True
+
+
+class TestGetChangeAges:
+    """Tests for get_change_ages() function."""
+
+    def test_get_change_ages_success(self, cgm_module, mock_capabilities_with_pump):
+        """Should return CAGE/SAGE/IAGE with age and average interval values."""
+        cgm_module._pump_capabilities = mock_capabilities_with_pump
+        now = datetime.now(timezone.utc)
+
+        def _mk(hours_ago):
+            return {"created_at": (now - timedelta(hours=hours_ago)).isoformat().replace("+00:00", "Z")}
+
+        responses = {
+            "Site Change": [_mk(48), _mk(120)],
+            "Sensor Change": [_mk(240), _mk(480)],
+            "Insulin Change": [_mk(36), _mk(84)],
+        }
+
+        def mock_get(url, params=None, **kwargs):
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.json.return_value = responses[params["find[eventType]"]]
+            return mock_resp
+
+        with patch("requests.get", side_effect=mock_get):
+            result = cgm_module.get_change_ages(limit=25)
+
+        assert "error" not in result
+        assert result["metrics"]["cage"]["event_type"] == "Site Change"
+        assert result["metrics"]["sage"]["event_type"] == "Sensor Change"
+        assert result["metrics"]["iage"]["event_type"] == "Insulin Change"
+        assert result["metrics"]["cage"]["age_days"] >= 1.9
+        assert result["metrics"]["cage"]["age_days"] <= 2.1
+        assert result["metrics"]["cage"]["average_interval_days"] == 3.0
+        assert result["metrics"]["cage"]["changes_observed"] == 2
+
+    def test_get_change_ages_missing_event_data(self, cgm_module, mock_capabilities_with_pump):
+        """Should handle event types with no treatment history."""
+        cgm_module._pump_capabilities = mock_capabilities_with_pump
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = []
+
+        with patch("requests.get", return_value=mock_resp):
+            result = cgm_module.get_change_ages()
+
+        assert "error" not in result
+        assert result["metrics"]["cage"]["last_change"] is None
+        assert result["metrics"]["sage"]["average_interval_days"] is None
+        assert result["metrics"]["iage"]["changes_observed"] == 0
+
+    def test_get_change_ages_cgm_only(self, cgm_module, mock_capabilities_cgm_only):
+        """Should return helpful error for CGM-only users."""
+        cgm_module._pump_capabilities = mock_capabilities_cgm_only
+
+        result = cgm_module.get_change_ages()
+
+        assert "error" in result
+        assert result["cgm_only"] is True
+
+    def test_get_change_ages_handles_naive_timestamps(self, cgm_module, mock_capabilities_with_pump):
+        """Should normalize timestamps without timezone info to UTC."""
+        cgm_module._pump_capabilities = mock_capabilities_with_pump
+        naive_timestamp = (datetime.now(timezone.utc) - timedelta(hours=24)).replace(tzinfo=None).isoformat()
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = [{"created_at": naive_timestamp}]
+
+        with patch("requests.get", return_value=mock_resp):
+            result = cgm_module.get_change_ages()
+
+        assert "error" not in result
+        assert result["metrics"]["cage"]["age_days"] >= 0.9
+        assert result["metrics"]["cage"]["last_change"].endswith("+00:00")
+
+    def test_get_change_ages_skips_malformed_entries(self, cgm_module, mock_capabilities_with_pump):
+        """Should ignore malformed treatment entries instead of crashing."""
+        cgm_module._pump_capabilities = mock_capabilities_with_pump
+        valid_timestamp = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = [
+            {"created_at": valid_timestamp},
+            {"created_at": "not-a-date"},
+            "not-a-dict",
+            None,
+        ]
+
+        with patch("requests.get", return_value=mock_resp):
+            result = cgm_module.get_change_ages()
+
+        assert "error" not in result
+        assert result["metrics"]["cage"]["changes_observed"] == 1
+
+    def test_get_change_ages_rejects_non_list_response(self, cgm_module, mock_capabilities_with_pump):
+        """Should return an error if Nightscout returns an unexpected payload shape."""
+        cgm_module._pump_capabilities = mock_capabilities_with_pump
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {"unexpected": "shape"}
+
+        with patch("requests.get", return_value=mock_resp):
+            result = cgm_module.get_change_ages()
+
+        assert "error" in result
+        assert "expected a list" in result["error"]
+
+    def test_get_change_ages_rejects_invalid_limit(self, cgm_module, mock_capabilities_with_pump):
+        """Should reject zero or negative count values before calling Nightscout."""
+        cgm_module._pump_capabilities = mock_capabilities_with_pump
+
+        with patch("requests.get") as mock_get:
+            result = cgm_module.get_change_ages(limit=0)
+
+        assert "error" in result
+        assert "positive integer" in result["error"]
+        mock_get.assert_not_called()
+
+
 # =============================================================================
 # PROFILE TESTS
 # =============================================================================
@@ -500,6 +687,38 @@ class TestPumpCLI:
                     except SystemExit:
                         pass
                     mock_func.assert_called_once_with(hours=6)
+
+    def test_events_command(self, cgm_module):
+        """'events' command should call get_event_correlations."""
+        with patch.object(cgm_module, "get_event_correlations") as mock_func:
+            mock_func.return_value = {"events": []}
+            with patch.object(sys, "argv", [
+                "cgm.py", "events", "--tag", "pizza", "--days", "30",
+                "--window-minutes", "120", "--limit", "5"
+            ]):
+                with patch("builtins.print"):
+                    try:
+                        cgm_module.main()
+                    except SystemExit:
+                        pass
+                    mock_func.assert_called_once_with(
+                        tag="pizza",
+                        days=30,
+                        window_minutes=120,
+                        limit=5
+                    )
+
+    def test_ages_command_with_count(self, cgm_module):
+        """'ages --count N' should pass count parameter."""
+        with patch.object(cgm_module, "get_change_ages") as mock_func:
+            mock_func.return_value = {"metrics": {}}
+            with patch.object(sys, "argv", ["cgm.py", "ages", "--count", "25"]):
+                with patch("builtins.print"):
+                    try:
+                        cgm_module.main()
+                    except SystemExit:
+                        pass
+                    mock_func.assert_called_once_with(limit=25)
 
     def test_profile_command(self, cgm_module):
         """'profile' command should call get_profile."""

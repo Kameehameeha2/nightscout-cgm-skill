@@ -33,10 +33,12 @@ Where `<skill-path>` is the location where this skill is installed (e.g., `~/.co
 |---------|-------------|
 | `current` | Get the latest glucose reading |
 | `analyze [--days N]` | Analyze CGM data (default: 90 days) |
-| `report [--days N] [--open]` | Generate interactive HTML report with charts |
+| `report [--days N] [--open]` | Generate interactive, PDF-printable HTML report with charts |
+| `goals [view|set|clear]` | View, configure, or clear local report goals |
 | `compare --period1 P1 --period2 P2` | Compare two time periods side-by-side |
 | `alerts [--days N]` | Get trend alerts for recurring patterns |
 | `refresh [--days N]` | Fetch latest data from Nightscout |
+| `auto-refresh [view|set|on|off]` | Configure refresh-on-query sync, no daemon required |
 | `patterns [--days N]` | Find interesting patterns (best/worst times, problem areas) |
 | `query [options]` | Query with filters (day of week, time range) |
 | `day <date> [options]` | View all readings for a specific date |
@@ -44,6 +46,8 @@ Where `<skill-path>` is the location where this skill is installed (e.g., `~/.co
 | `chart [options]` | Terminal visualizations (heatmap, sparkline, day chart) |
 | `pump` | Get current pump status (IOB, COB, predicted glucose) * |
 | `treatments [--hours N]` | Get recent treatments (boluses, temp basals, carbs) * |
+| `events [--tag TEXT] [--days N]` | Correlate glucose response around existing Nightscout treatments/events * |
+| `ages [--count N]` | Get CAGE/SAGE/IAGE from Site/Sensor/Insulin Change events * |
 | `profile` | Get pump profile settings (basal rates, ISF, carb ratios) * |
 
 \* **Pump commands require Loop, OpenAPS, or similar closed-loop system.** The skill auto-detects pump capabilities on first use. CGM-only users won't see errors—commands simply report that pump data isn't available.
@@ -60,13 +64,29 @@ Generate a comprehensive, self-contained HTML report with interactive charts:
 **Report Features:**
 - Interactive date controls (7d/14d/30d/90d/6mo/1yr/All + custom date pickers)
 - All charts recalculate dynamically in browser
+- Print / Save PDF action with print-friendly styles
 - Time-in-Range pie chart
 - Modal Day (24-hour profile with percentile bands)
 - Daily trends, Day of week comparison
 - Glucose histogram, Heatmap with hover tooltips
 - Weekly summary
 - Key stats: TIR%, GMI (estimated A1C), CV (variability)
+- Goal tracking: configurable TIR, CV, GMI, and average glucose targets
 - **Insulin Delivery** (if using Loop/OpenAPS): TDD breakdown (bolus/basal), stacked bar chart, carb tracking
+
+### Goals Command
+
+Configure local report goals stored in `config.json`:
+- `goals` or `goals view` - Show active goals
+- `goals set --tir PCT --cv PCT --gmi PCT --average MGDL` - Set one or more goals
+- `goals clear` - Remove custom goals and return to defaults
+
+### Auto-Refresh Command
+
+Configure stale-data sync before read-only queries. This does not run a persistent daemon:
+- `auto-refresh` or `auto-refresh view` - Show current refresh-on-query settings
+- `auto-refresh set --minutes N` - Sync before queries when the newest local reading is older than N minutes
+- `auto-refresh on` / `auto-refresh off` - Enable or disable refresh-on-query
 
 ### Day Command
 
@@ -121,6 +141,17 @@ These commands require a closed-loop system (Loop, OpenAPS, AndroidAPS, etc.) up
 - Carb entries
 - Summary totals (total insulin, total carbs)
 
+**`events [--tag TEXT] [--days N] [--window-minutes N]`** - Correlate existing Nightscout events:
+- Matches text in event type, notes, enteredBy, foodType, or reason
+- Compares the 30-minute baseline before the event to the post-event window
+- Does not store local annotations or edit Nightscout data
+
+**`ages [--count N]`** - Get CAGE/SAGE/IAGE:
+- CAGE: time since last `Site Change`
+- SAGE: time since last `Sensor Change`
+- IAGE: time since last `Insulin Change`
+- Average interval in days and observed change count per type
+
 **`profile`** - Get pump profile settings:
 - Basal rates by time of day
 - Total daily basal
@@ -137,6 +168,12 @@ python scripts/cgm.py current
 
 # Generate interactive HTML report (opens in browser)
 python scripts/cgm.py report --days 90 --open
+
+# Configure report goals
+python scripts/cgm.py goals set --tir 75 --cv 34 --gmi 6.8 --average 145
+
+# Configure refresh-on-query sync
+python scripts/cgm.py auto-refresh set --minutes 15
 
 # Analyze last 30 days
 python scripts/cgm.py analyze --days 30

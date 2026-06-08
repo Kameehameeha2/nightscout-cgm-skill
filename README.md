@@ -13,7 +13,12 @@ An [Agent Skill](https://github.com/agentskills/agentskills) for analyzing Conti
 
 - **Interactive HTML Reports** - Generate comprehensive local reports with charts (like [tally](https://github.com/davidfowl/tally) for diabetes)
 - **Pump/Insulin Integration** - Reports automatically include insulin delivery data if you use Loop/OpenAPS (stacked bolus/basal charts, TDD breakdown)
+- **Pump Change Ages** - CAGE/SAGE/IAGE metrics from Nightscout Site/Sensor/Insulin Change treatment events
+- **Event Correlations** - Analyze glucose response around existing Nightscout meal, note, carb, and bolus events
 - **AGP Reports** - Generate clinical-standard Ambulatory Glucose Profile (AGP) reports for sharing with healthcare providers
+- **PDF Export** - Reports include print-friendly styling and a Print / Save PDF action for doctor visits and records
+- **Goal Tracking** - Configure local goals for TIR, CV, GMI, and average glucose and see them in reports
+- **Refresh-on-Query Sync** - Read-only commands auto-sync stale local data before analysis, with no daemon required
 - **Current Glucose** - Real-time blood glucose with trend direction
 - **Trend Alerts** - Proactive pattern detection for recurring lows/highs (e.g., "Morning lows 8-10am")
 - **Period Comparison** - Compare different time periods side-by-side to track progress
@@ -60,7 +65,9 @@ python scripts/cgm.py report --days 90 --open
 
 - **Date Range Controls** - Quick buttons for 7d/14d/30d/90d/6mo/1yr/All, plus custom date pickers
 - **All charts update dynamically** - No server needed, everything recalculates in your browser
+- **Print / Save PDF** - Use the report action button or your browser's print dialog to save a PDF
 - **Key Stats Dashboard** - Time-in-Range %, GMI (estimated A1C), CV (variability), average glucose
+- **Goal Tracking** - Configurable targets for TIR, CV, GMI, and average glucose
 - **7 Interactive Charts:**
   - Time-in-Range pie chart
   - Modal Day (typical 24-hour profile with percentile bands)
@@ -112,6 +119,15 @@ Or use the CLI directly:
 ```bash
 # Generate interactive HTML report
 python scripts/cgm.py report --days 90 --open
+# Then click "Print / Save PDF" in the report to export a PDF
+
+# View or set local report goals
+python scripts/cgm.py goals view
+python scripts/cgm.py goals set --tir 75 --cv 34 --gmi 6.8 --average 145
+
+# View or change refresh-on-query sync interval
+python scripts/cgm.py auto-refresh view
+python scripts/cgm.py auto-refresh set --minutes 15
 
 # Current glucose
 python scripts/cgm.py current
@@ -144,6 +160,12 @@ python scripts/cgm.py chart --sparkline
 
 # Weekly heatmap
 python scripts/cgm.py chart --heatmap
+
+# Site/sensor/insulin change ages from treatment events
+python scripts/cgm.py ages --count 100
+
+# Correlate existing Nightscout events/treatments with glucose response
+python scripts/cgm.py events --tag pizza --days 90
 ```
 
 ## Privacy & Data Architecture
@@ -594,4 +616,3 @@ python -m pytest tests/test_real_data.py -v
 | test_real_data.py | Tests using real Nightscout API responses |
 | test_pump.py | Pump commands, treatments, profile |
 | test_coverage_gaps.py | Error handling edge cases |
-

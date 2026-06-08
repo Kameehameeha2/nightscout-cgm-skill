@@ -128,6 +128,13 @@ def get_thresholds():
 SKILL_DIR = Path(__file__).parent.parent
 DB_PATH = SKILL_DIR / "cgm_data.db"
 CONFIG_PATH = SKILL_DIR / "config.json"
+DEFAULT_GOALS = {
+    "tir": 70.0,
+    "cv": 36.0,
+    "gmi": 7.0,
+    "average_glucose": 154.0
+}
+DEFAULT_AUTO_REFRESH_MINUTES = 30
 
 # Cached pump capabilities (None = not checked yet)
 _pump_capabilities = None
@@ -151,6 +158,123 @@ def _save_config(config):
             json.dump(config, f, indent=2)
     except IOError:
         pass
+
+
+def get_goals():
+    """Get configured glucose goals, falling back to standard defaults."""
+    config = _load_config()
+    custom_goals = config.get("goals", {})
+    goals = DEFAULT_GOALS.copy()
+    if isinstance(custom_goals, dict):
+        for key in goals:
+            value = custom_goals.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                goals[key] = float(value)
+    return goals
+
+
+def set_goals(tir=None, cv=None, gmi=None, average_glucose=None):
+    """Persist user glucose goals in config.json."""
+    config = _load_config()
+    goals = get_goals()
+    updates = {
+        "tir": tir,
+        "cv": cv,
+        "gmi": gmi,
+        "average_glucose": average_glucose
+    }
+    for key, value in updates.items():
+        if value is not None:
+            goals[key] = float(value)
+
+    config["goals"] = goals
+    _save_config(config)
+    return {"status": "saved", "goals": goals}
+
+
+def clear_goals():
+    """Clear custom goals and return defaults."""
+    config = _load_config()
+    if "goals" in config:
+        del config["goals"]
+        _save_config(config)
+    return {"status": "cleared", "goals": DEFAULT_GOALS.copy()}
+
+
+def build_goal_status(tir_pct, cv, gmi, average_glucose_mgdl, goals):
+    """Build goal status cards for the report."""
+    return [
+        {
+            "label": "Time in Range",
+            "actual": round(tir_pct, 1),
+            "target": goals["tir"],
+            "unit": "%",
+            "direction": ">=",
+            "met": tir_pct >= goals["tir"]
+        },
+        {
+            "label": "Glucose Variability",
+            "actual": round(cv, 1),
+            "target": goals["cv"],
+            "unit": "%",
+            "direction": "<=",
+            "met": cv <= goals["cv"]
+        },
+        {
+            "label": "GMI",
+            "actual": round(gmi, 1),
+            "target": goals["gmi"],
+            "unit": "%",
+            "direction": "<=",
+            "met": gmi <= goals["gmi"]
+        },
+        {
+            "label": "Average Glucose",
+            "actual": convert_glucose(round(average_glucose_mgdl, 1)),
+            "target": convert_glucose(goals["average_glucose"]),
+            "unit": get_unit_label(),
+            "direction": "<=",
+            "met": average_glucose_mgdl <= goals["average_glucose"]
+        }
+    ]
+
+
+def get_auto_refresh_settings():
+    """Get refresh-on-query settings from config."""
+    config = _load_config()
+    settings = config.get("auto_refresh", {})
+    enabled = True
+    minutes = DEFAULT_AUTO_REFRESH_MINUTES
+
+    if isinstance(settings, dict):
+        if isinstance(settings.get("enabled"), bool):
+            enabled = settings["enabled"]
+        interval = settings.get("minutes")
+        if isinstance(interval, int) and interval > 0:
+            minutes = interval
+
+    return {
+        "mode": "refresh_on_query",
+        "enabled": enabled,
+        "minutes": minutes
+    }
+
+
+def set_auto_refresh(minutes=None, enabled=None):
+    """Persist refresh-on-query settings."""
+    config = _load_config()
+    settings = get_auto_refresh_settings()
+    if minutes is not None:
+        settings["minutes"] = int(minutes)
+    if enabled is not None:
+        settings["enabled"] = bool(enabled)
+
+    config["auto_refresh"] = {
+        "enabled": settings["enabled"],
+        "minutes": settings["minutes"]
+    }
+    _save_config(config)
+    return settings
 
 
 def detect_pump_capabilities():
@@ -307,18 +431,24 @@ def ensure_data(days=90):
     return True
 
 
-def ensure_fresh_data(days=90, max_stale_minutes=30):
+def ensure_fresh_data(days=90, max_stale_minutes=None):
     """
     Ensure data is fresh (synced within max_stale_minutes) before major operations.
     Auto-syncs if the most recent reading is older than the threshold.
     
     Args:
         days: Number of days of data to ensure we have
-        max_stale_minutes: Maximum age of most recent reading before auto-sync (default: 30)
+        max_stale_minutes: Maximum age of most recent reading before auto-sync
     
     Returns:
         True if data is available and fresh, False if sync failed
     """
+    settings = get_auto_refresh_settings()
+    if not settings["enabled"]:
+        return ensure_data(days)
+    if max_stale_minutes is None:
+        max_stale_minutes = settings["minutes"]
+
     if not DB_PATH.exists():
         return ensure_data(days)
     
@@ -439,7 +569,7 @@ def get_time_in_range(values):
 
 def analyze_cgm(days=90):
     """Analyze CGM data from database."""
-    if not ensure_data(days):
+    if not ensure_fresh_data(days):
         return {"error": "Could not fetch data from Nightscout. Check your NIGHTSCOUT_URL."}
 
     conn = sqlite3.connect(DB_PATH)
@@ -607,7 +737,7 @@ def compare_periods(period1_str, period2_str):
         return {"error": str(e)}
     
     # Fetch data for both periods
-    if not ensure_data(max(90, (datetime.now(timezone.utc) - start1).days, (datetime.now(timezone.utc) - start2).days)):
+    if not ensure_fresh_data(max(90, (datetime.now(timezone.utc) - start1).days, (datetime.now(timezone.utc) - start2).days)):
         return {"error": "Could not fetch data from Nightscout. Check your NIGHTSCOUT_URL."}
     
     conn = sqlite3.connect(DB_PATH)
@@ -856,7 +986,7 @@ def show_sparkline(hours=24, use_color=True, date_str=None, hour_start=None, hou
     If date_str is provided, shows that specific date (with optional hour range).
     Otherwise shows the last N hours from now.
     """
-    if not ensure_data():
+    if not ensure_fresh_data():
         return
     
     conn = sqlite3.connect(DB_PATH)
@@ -981,7 +1111,7 @@ def show_sparkline_week(days=7, use_color=True):
     Display sparklines for each day, one line per day.
     Each line shows 24 hours of data, sampled to ~48 points to fit terminal width.
     """
-    if not ensure_data(days):
+    if not ensure_fresh_data(days):
         return
     
     conn = sqlite3.connect(DB_PATH)
@@ -1101,7 +1231,7 @@ def show_sparkline_week(days=7, use_color=True):
 
 def show_heatmap(days=90, use_color=True):
     """Display a terminal heatmap of time-in-range by day and hour."""
-    if not ensure_data(days):
+    if not ensure_fresh_data(days):
         return
 
     conn = sqlite3.connect(DB_PATH)
@@ -1212,7 +1342,7 @@ def show_heatmap(days=90, use_color=True):
 
 def show_day_chart(day_name, days=90, use_color=True):
     """Display a bar chart for a specific day."""
-    if not ensure_data(days):
+    if not ensure_fresh_data(days):
         return
 
     day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -1319,7 +1449,7 @@ def query_patterns(days=90, day_of_week=None, hour_start=None, hour_end=None):
         hour_start: Start hour (0-23) for time window
         hour_end: End hour (0-23) for time window
     """
-    if not ensure_data(days):
+    if not ensure_fresh_data(days):
         return {"error": "Could not fetch data from Nightscout. Check your NIGHTSCOUT_URL."}
 
     conn = sqlite3.connect(DB_PATH)
@@ -1408,7 +1538,7 @@ def find_patterns(days=90):
     Automatically find interesting patterns in the data.
     Identifies best/worst times, days, and trends.
     """
-    if not ensure_data(days):
+    if not ensure_fresh_data(days):
         return {"error": "Could not fetch data from Nightscout. Check your NIGHTSCOUT_URL."}
 
     conn = sqlite3.connect(DB_PATH)
@@ -1540,7 +1670,7 @@ def detect_trend_alerts(days=90, min_occurrences=2):
     Returns:
         Dictionary with detected alerts categorized by type
     """
-    if not ensure_data(days):
+    if not ensure_fresh_data(days):
         return {"error": "Could not fetch data from Nightscout. Check your NIGHTSCOUT_URL."}
     
     conn = sqlite3.connect(DB_PATH)
@@ -1820,7 +1950,7 @@ def view_day(date_str, hour_start=None, hour_end=None):
     View all glucose readings for a specific date.
     Shows detailed timeline with trends and statistics.
     """
-    if not ensure_data(90):
+    if not ensure_fresh_data(90):
         return {"error": "Could not fetch data from Nightscout. Check your NIGHTSCOUT_URL."}
     
     try:
@@ -1918,7 +2048,7 @@ def find_worst_days(days=21, hour_start=None, hour_end=None, limit=5):
     Find the worst days for glucose control in a given period.
     Ranks days by peak glucose and time out of range.
     """
-    if not ensure_data(days):
+    if not ensure_fresh_data(days):
         return {"error": "Could not fetch data from Nightscout. Check your NIGHTSCOUT_URL."}
     
     conn = sqlite3.connect(DB_PATH)
@@ -1981,6 +2111,56 @@ def find_worst_days(days=21, hour_start=None, hour_end=None, limit=5):
         "filter": time_filter,
         "worst_days": worst_days,
         "unit": get_unit_label()
+    }
+
+
+def build_executive_summary(tir_data, cv, alerts):
+    """Build deterministic top-of-report summary text from report metrics."""
+    in_range = float(tir_data.get("in_range", 0))
+    low_total = float(tir_data.get("very_low", 0)) + float(tir_data.get("low", 0))
+    high_total = float(tir_data.get("high", 0)) + float(tir_data.get("very_high", 0))
+    significant_alerts = [
+        alert for alert in alerts
+        if isinstance(alert, dict) and alert.get("severity") in {"high", "medium"}
+    ]
+
+    if low_total >= 4:
+        status = "Time below range needs attention"
+        severity = "warning"
+    elif in_range >= 70 and cv < 36 and not significant_alerts:
+        status = "Glucose profile is stable for this period"
+        severity = "good"
+    elif in_range < 70 and high_total >= low_total:
+        status = "Time above range is the main opportunity"
+        severity = "warning"
+    elif cv >= 36:
+        status = "Glucose variability is elevated"
+        severity = "warning"
+    elif significant_alerts:
+        status = "Recurring patterns need review"
+        severity = "warning"
+    else:
+        status = "Glucose profile is mixed for this period"
+        severity = "neutral"
+
+    if cv < 36:
+        cv_text = f"Glucose variability CV is {cv:.1f}%, within the <36% stability goal."
+    else:
+        cv_text = f"Glucose variability CV is {cv:.1f}%, above the <36% stability goal."
+
+    if significant_alerts:
+        alert_text = f"{len(significant_alerts)} recurring trend alert(s) were detected; review Trend Alerts below."
+    else:
+        alert_text = "No recurring high/medium trend alerts were detected for this period."
+
+    return {
+        "status": status,
+        "severity": severity,
+        "bullets": [
+            f"Time in range is {in_range:.1f}% (goal >=70%).",
+            f"Time below range is {low_total:.1f}% (goal <4%).",
+            cv_text if not significant_alerts else alert_text
+        ]
     }
 
 
@@ -2058,6 +2238,8 @@ def generate_html_report(days=90, output_path=None):
         "high": round(high / total * 100, 1),
         "very_high": round(very_high / total * 100, 1)
     }
+    goals = get_goals()
+    goal_status = build_goal_status(tir_data["in_range"], cv, gmi, raw_mean, goals)
     
     # Hourly data for Modal Day chart (all days overlaid)
     hourly_all = defaultdict(list)
@@ -2187,25 +2369,57 @@ def generate_html_report(days=90, output_path=None):
     
     # Weekly summaries (for the period selector)
     weekly_data = defaultdict(list)
+    weekly_daily_data = defaultdict(lambda: defaultdict(list))
     for sgv, _, ds, _ in rows:
         try:
             dt = datetime.fromisoformat(ds.replace("Z", "+00:00"))
             week_start = (dt - timedelta(days=dt.weekday())).strftime("%Y-%m-%d")
+            date_key = dt.strftime("%Y-%m-%d")
             weekly_data[week_start].append(sgv)
+            weekly_daily_data[week_start][date_key].append(sgv)
         except (ValueError, TypeError):
             pass
-    
+
     weekly_stats = []
+    previous_week_tir = None
     for week_start in sorted(weekly_data.keys()):
         values = weekly_data[week_start]
         if values:
             in_r = sum(1 for v in values if t["target_low"] <= v <= t["target_high"])
+            tir_pct = round(in_r / len(values) * 100, 1)
+            day_summaries = []
+            for date_key, day_values in weekly_daily_data[week_start].items():
+                day_in_range = sum(1 for v in day_values if t["target_low"] <= v <= t["target_high"])
+                day_tir = round(day_in_range / len(day_values) * 100, 1)
+                day_name = datetime.fromisoformat(date_key).strftime("%A")
+                day_summaries.append({
+                    "date": date_key,
+                    "day": day_name,
+                    "tir": day_tir,
+                    "readings": len(day_values)
+                })
+            best_day = max(day_summaries, key=lambda d: (d["tir"], d["readings"])) if day_summaries else None
+            tir_delta = None if previous_week_tir is None else round(tir_pct - previous_week_tir, 1)
+            if tir_delta is None:
+                note = "Baseline week in selected period."
+            elif tir_delta >= 5:
+                note = f"TIR improved by {tir_delta:.1f} points from the previous week."
+            elif tir_delta <= -5:
+                note = f"TIR decreased by {abs(tir_delta):.1f} points from the previous week."
+            elif tir_pct >= 70:
+                note = "TIR stayed near goal compared with the previous week."
+            else:
+                note = "TIR was similar to the previous week and remains below goal."
             weekly_stats.append({
                 "week": week_start,
                 "mean": convert_glucose(round(sum(values) / len(values), 1)),
-                "tir": round(in_r / len(values) * 100, 1),
-                "readings": len(values)
+                "tir": tir_pct,
+                "readings": len(values),
+                "best_day": best_day,
+                "tir_delta": tir_delta,
+                "note": note
             })
+            previous_week_tir = tir_pct
     
     # Date range info
     first_date = rows[0][2][:10] if rows[0][2] else "unknown"
@@ -2216,6 +2430,7 @@ def generate_html_report(days=90, output_path=None):
     # =========================================================================
     alerts_result = detect_trend_alerts(days, min_occurrences=2)
     alerts = alerts_result.get("alerts", []) if "error" not in alerts_result else []
+    executive_summary = build_executive_summary(tir_data, cv, alerts)
     
     # =========================================================================
     # Pump/Treatment Data (if available)
@@ -2406,6 +2621,39 @@ def generate_html_report(days=90, output_path=None):
         .date-range-display strong {
             color: var(--text-primary);
         }
+
+        .section-nav {
+            position: sticky;
+            top: 0;
+            z-index: 900;
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            justify-content: center;
+            padding: 10px;
+            margin: 0 0 24px;
+            background: rgba(26, 26, 46, 0.96);
+            border: 1px solid var(--bg-card);
+            border-radius: 12px;
+            backdrop-filter: blur(8px);
+        }
+
+        .section-nav a {
+            color: var(--text-primary);
+            text-decoration: none;
+            background: var(--bg-card);
+            border: 1px solid transparent;
+            border-radius: 999px;
+            padding: 6px 12px;
+            font-size: 0.85rem;
+            transition: background 0.2s, border-color 0.2s, transform 0.2s;
+        }
+
+        .section-nav a:hover {
+            background: var(--bg-secondary);
+            border-color: var(--accent);
+            transform: translateY(-1px);
+        }
         
         * {
             margin: 0;
@@ -2418,6 +2666,7 @@ def generate_html_report(days=90, output_path=None):
             background: var(--bg-primary);
             color: var(--text-primary);
             line-height: 1.6;
+            padding-bottom: 96px;
         }
         
         .container {
@@ -2475,6 +2724,52 @@ def generate_html_report(days=90, output_path=None):
         .stat-card.tir .value { color: var(--in-range); }
         .stat-card.gmi .value { color: var(--info); }
         .stat-card.cv .value { color: var(--warning); }
+
+        .goals-section {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+
+        .goals-section h2 {
+            font-size: 1.3rem;
+            margin-bottom: 15px;
+        }
+
+        .goals-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+            gap: 12px;
+        }
+
+        .goal-card {
+            background: var(--bg-card);
+            border-radius: 8px;
+            padding: 14px;
+            border-left: 4px solid var(--warning);
+        }
+
+        .goal-card.goal-met {
+            border-left-color: var(--success);
+        }
+
+        .goal-card .goal-label {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            margin-bottom: 6px;
+        }
+
+        .goal-card .goal-value {
+            font-size: 1.15rem;
+            font-weight: 700;
+        }
+
+        .goal-card .goal-target {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            margin-top: 4px;
+        }
         
         .alerts-section {
             background: var(--bg-secondary);
@@ -2532,6 +2827,42 @@ def generate_html_report(days=90, output_path=None):
         .alerts-section h2::before {
             content: '⚠️';
             font-size: 1.5rem;
+        }
+
+        .executive-summary {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 30px;
+            border-left: 4px solid var(--info);
+        }
+
+        .executive-summary.summary-good {
+            border-left-color: var(--success);
+        }
+
+        .executive-summary.summary-warning {
+            border-left-color: var(--warning);
+        }
+
+        .executive-summary h2 {
+            font-size: 1.3rem;
+            margin-bottom: 8px;
+        }
+
+        .executive-summary .summary-status {
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+
+        .executive-summary ul {
+            margin-left: 20px;
+            color: var(--text-secondary);
+        }
+
+        .executive-summary li {
+            margin: 4px 0;
         }
         
         .alerts-summary {
@@ -2779,6 +3110,36 @@ def generate_html_report(days=90, output_path=None):
         .tir-dot.in-range { background: var(--in-range); }
         .tir-dot.high { background: var(--high); }
         .tir-dot.very-high { background: var(--very-high); }
+
+        .weekly-context {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .weekly-context-card {
+            background: var(--bg-card);
+            border-radius: 8px;
+            padding: 12px;
+        }
+
+        .weekly-context-card .week-label {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            margin-bottom: 6px;
+        }
+
+        .weekly-context-card .week-main {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .weekly-context-card .week-note {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
         
         .heatmap-container {
             overflow-x: auto;
@@ -3117,6 +3478,8 @@ def generate_html_report(days=90, output_path=None):
             
             /* Hide interactive elements and compare section */
             .date-controls,
+            .section-nav,
+            .report-actions,
             .print-button,
             .alerts-toggle,
             .alerts-expand,
@@ -3197,11 +3560,31 @@ def generate_html_report(days=90, output_path=None):
             }
         }
         
-        /* Print button */
-        .print-button {
+        /* Floating report actions */
+        .section-anchor {
+            scroll-margin-top: 96px;
+        }
+
+        #section-summary,
+        #section-insulin,
+        .chart-section {
+            scroll-margin-top: 96px;
+        }
+
+        /* Floating report actions */
+        .report-actions {
             position: fixed;
             bottom: 20px;
             right: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            gap: 12px;
+            max-width: calc(100vw - 40px);
+            z-index: 1000;
+        }
+
+        .print-button {
             background: var(--accent);
             color: white;
             border: none;
@@ -3213,19 +3596,17 @@ def generate_html_report(days=90, output_path=None):
             display: flex;
             align-items: center;
             gap: 8px;
-            z-index: 1000;
-            transition: transform 0.2s, box-shadow 0.2s;
+            transition: transform 0.2s, box-shadow 0.2s, opacity 0.2s;
+            opacity: 0.92;
         }
-        
+
         .print-button:hover {
             transform: translateY(-2px);
             box-shadow: 0 6px 16px rgba(0,0,0,0.4);
+            opacity: 1;
         }
         
         .agp-button {
-            position: fixed;
-            bottom: 20px;
-            right: 230px;
             background: #059669;
             color: white;
             text-decoration: none;
@@ -3235,16 +3616,38 @@ def generate_html_report(days=90, output_path=None):
             line-height: normal;
             cursor: pointer;
             box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-            z-index: 1000;
-            transition: transform 0.2s, box-shadow 0.2s;
+            transition: transform 0.2s, box-shadow 0.2s, opacity 0.2s;
+            opacity: 0.92;
         }
         
         .agp-button:hover {
             transform: translateY(-2px);
             box-shadow: 0 6px 16px rgba(0,0,0,0.4);
+            opacity: 1;
+        }
+
+        @media (max-width: 768px) {
+            body {
+                padding-bottom: 130px;
+            }
+
+            .report-actions {
+                left: 12px;
+                right: 12px;
+                bottom: 12px;
+            }
+
+            .print-button,
+            .agp-button {
+                flex: 1 1 160px;
+                justify-content: center;
+                padding: 10px 12px;
+                font-size: 0.85rem;
+            }
         }
         
         @media print {
+            .report-actions,
             .agp-button {
                 display: none !important;
             }
@@ -3275,14 +3678,29 @@ def generate_html_report(days=90, output_path=None):
                 <input type="date" id="endDate" onchange="applyCustomDateRange()" title="End date">
             </div>
         </div>
+
+        <nav class="section-nav" aria-label="Report sections">
+            <a href="#section-summary">Summary</a>
+            <a href="#section-alerts">Alerts</a>
+            %(pump_nav_link)s
+            <a href="#section-tir">Time in Range</a>
+            <a href="#section-modal-day">Modal Day</a>
+            <a href="#section-daily">Daily</a>
+            <a href="#section-dow">Day of Week</a>
+            <a href="#section-histogram">Distribution</a>
+            <a href="#section-heatmap">Heatmap</a>
+            <a href="#section-weekly">Weekly</a>
+        </nav>
         
         <div class="disclaimer">
             ⚠️ <strong>Not medical advice.</strong> This report is for informational purposes only. 
             Always consult your healthcare provider for diabetes management decisions.
         </div>
-        
+
+        %(executive_summary_html)s
+
         <!-- Key Metrics -->
-        <div class="stats-grid">
+        <div class="stats-grid" id="section-summary">
             <div class="stat-card tir">
                 <div class="value">%(tir_in_range).1f%%</div>
                 <div class="label">Time in Range (%(target_low)s-%(target_high)s %(unit)s)</div>
@@ -3300,7 +3718,9 @@ def generate_html_report(days=90, output_path=None):
                 <div class="label">Average Glucose (%(unit)s)</div>
             </div>
         </div>
-        
+
+        %(goal_status_html)s
+
         <!-- Compare Periods (collapsed by default) -->
         <div class="compare-section collapsed" id="compareSection">
             <div class="compare-header" onclick="toggleCompareSection()">
@@ -3333,6 +3753,7 @@ def generate_html_report(days=90, output_path=None):
         </div>
         
         <!-- Trend Alerts (collapsed by default) -->
+        <div id="section-alerts" class="section-anchor"></div>
         <div class="alerts-section collapsed" id="alertsSection">
             <div class="alerts-header" onclick="toggleAlertsSection()">
                 <h2>Trend Alerts</h2>
@@ -3356,7 +3777,7 @@ def generate_html_report(days=90, output_path=None):
         %(pump_section_html)s
         
         <!-- Time in Range Pie Chart -->
-        <div class="chart-section">
+        <div class="chart-section" id="section-tir">
             <h2>Time in Range Distribution</h2>
             <div class="chart-container">
                 <canvas id="tirPieChart"></canvas>
@@ -3371,7 +3792,7 @@ def generate_html_report(days=90, output_path=None):
         </div>
         
         <!-- Modal Day Chart -->
-        <div class="chart-section">
+        <div class="chart-section" id="section-modal-day">
             <h2>Modal Day (Typical 24-Hour Profile)</h2>
             <p style="color: var(--text-secondary); margin-bottom: 15px; font-size: 0.9rem;">
                 Shows your typical glucose pattern throughout the day. The shaded area represents the 10th-90th percentile range.
@@ -3383,7 +3804,7 @@ def generate_html_report(days=90, output_path=None):
         
         <div class="grid-2">
             <!-- Daily Trend -->
-            <div class="chart-section">
+            <div class="chart-section" id="section-daily">
                 <h2>Daily Average & Time in Range</h2>
                 <div class="chart-container">
                     <canvas id="dailyTrendChart"></canvas>
@@ -3391,7 +3812,7 @@ def generate_html_report(days=90, output_path=None):
             </div>
             
             <!-- Day of Week -->
-            <div class="chart-section">
+            <div class="chart-section" id="section-dow">
                 <h2>Day of Week Comparison</h2>
                 <div class="chart-container">
                     <canvas id="dowChart"></canvas>
@@ -3400,7 +3821,7 @@ def generate_html_report(days=90, output_path=None):
         </div>
         
         <!-- Glucose Distribution -->
-        <div class="chart-section">
+        <div class="chart-section" id="section-histogram">
             <h2>Glucose Distribution</h2>
             <div class="chart-container">
                 <canvas id="histogramChart"></canvas>
@@ -3408,7 +3829,7 @@ def generate_html_report(days=90, output_path=None):
         </div>
         
         <!-- Heatmap -->
-        <div class="chart-section">
+        <div class="chart-section" id="section-heatmap">
             <h2>Time-in-Range Heatmap (Day × Hour)</h2>
             <p style="color: var(--text-secondary); margin-bottom: 15px; font-size: 0.9rem;">
                 Darker green = higher time in range. Red/orange = problem areas needing attention.
@@ -3421,8 +3842,9 @@ def generate_html_report(days=90, output_path=None):
         </div>
         
         <!-- Weekly Summary -->
-        <div class="chart-section">
+        <div class="chart-section" id="section-weekly">
             <h2>Weekly Summary</h2>
+            <div class="weekly-context" id="weeklyContext"></div>
             <div class="chart-container">
                 <canvas id="weeklyChart"></canvas>
             </div>
@@ -3719,19 +4141,55 @@ def generate_html_report(days=90, output_path=None):
                 const dayOfWeek = d.getDay();
                 const diff = d.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1);
                 const weekStart = new Date(d.setDate(diff)).toISOString().split('T')[0];
-                if (!weekly[weekStart]) weekly[weekStart] = [];
-                weekly[weekStart].push(r.sgv);
+                const dateKey = r.date.split('T')[0];
+                if (!weekly[weekStart]) weekly[weekStart] = { values: [], days: {} };
+                if (!weekly[weekStart].days[dateKey]) weekly[weekStart].days[dateKey] = [];
+                weekly[weekStart].values.push(r.sgv);
+                weekly[weekStart].days[dateKey].push(r.sgv);
             });
-            
+
             const t = thresholds;
+            let previousTir = null;
             return Object.keys(weekly).sort().map(week => {
-                const vals = weekly[week];
+                const vals = weekly[week].values;
                 const inR = vals.filter(v => v >= t.targetLow && v <= t.targetHigh).length;
+                const tir = parseFloat((inR / vals.length * 100).toFixed(1));
+                const daySummaries = Object.keys(weekly[week].days).sort().map(date => {
+                    const dayVals = weekly[week].days[date];
+                    const dayInRange = dayVals.filter(v => v >= t.targetLow && v <= t.targetHigh).length;
+                    const dayTir = parseFloat((dayInRange / dayVals.length * 100).toFixed(1));
+                    return {
+                        date: date,
+                        day: new Date(date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long' }),
+                        tir: dayTir,
+                        readings: dayVals.length
+                    };
+                });
+                const bestDay = daySummaries.length
+                    ? daySummaries.reduce((best, day) => day.tir > best.tir || (day.tir === best.tir && day.readings > best.readings) ? day : best)
+                    : null;
+                const tirDelta = previousTir === null ? null : parseFloat((tir - previousTir).toFixed(1));
+                let note;
+                if (tirDelta === null) {
+                    note = 'Baseline week in selected period.';
+                } else if (tirDelta >= 5) {
+                    note = `TIR improved by ${tirDelta.toFixed(1)} points from the previous week.`;
+                } else if (tirDelta <= -5) {
+                    note = `TIR decreased by ${Math.abs(tirDelta).toFixed(1)} points from the previous week.`;
+                } else if (tir >= 70) {
+                    note = 'TIR stayed near goal compared with the previous week.';
+                } else {
+                    note = 'TIR was similar to the previous week and remains below goal.';
+                }
+                previousTir = tir;
                 return {
                     week: week,
                     mean: convertGlucose(Math.round(vals.reduce((a, b) => a + b, 0) / vals.length)),
-                    tir: (inR / vals.length * 100).toFixed(1),
-                    readings: vals.length
+                    tir: tir,
+                    readings: vals.length,
+                    best_day: bestDay,
+                    tir_delta: tirDelta,
+                    note: note
                 };
             });
         }
@@ -3825,12 +4283,16 @@ def generate_html_report(days=90, output_path=None):
             tirChart.update();
             
             // Update modal day
+            const modalDatasets = Object.fromEntries(modalChart.data.datasets.map(d => [d.label, d]));
             modalChart.data.labels = modalData.map(d => d.hour + ':00');
-            modalChart.data.datasets[0].data = modalData.map(d => d.p90);
-            modalChart.data.datasets[1].data = modalData.map(d => d.p10);
-            modalChart.data.datasets[2].data = modalData.map(d => d.p75);
-            modalChart.data.datasets[3].data = modalData.map(d => d.p25);
-            modalChart.data.datasets[4].data = modalData.map(d => d.median);
+            modalDatasets['90th Percentile'].data = modalData.map(d => d.p90);
+            modalDatasets['10th Percentile'].data = modalData.map(d => d.p10);
+            modalDatasets['75th Percentile'].data = modalData.map(d => d.p75);
+            modalDatasets['25th Percentile'].data = modalData.map(d => d.p25);
+            modalDatasets['Median'].data = modalData.map(d => d.median);
+            modalDatasets['Mean'].data = modalData.map(d => d.mean);
+            modalDatasets['Target Low'].data = modalData.map(() => convertGlucose(thresholds.targetLow));
+            modalDatasets['Target High'].data = modalData.map(() => convertGlucose(thresholds.targetHigh));
             modalChart.update();
             
             // Update daily trend
@@ -3869,11 +4331,38 @@ def generate_html_report(days=90, output_path=None):
                 parseFloat(d.tir) >= 70 ? colors.inRange : parseFloat(d.tir) >= 50 ? colors.low : colors.veryLow
             );
             weeklyChart.update();
-            
+            renderWeeklyContext(weeklyData);
+
             // Update heatmap
             updateHeatmap(heatmapData);
         }
-        
+
+        function renderWeeklyContext(weeks) {
+            const container = document.getElementById('weeklyContext');
+            if (!container) return;
+            if (!weeks || weeks.length === 0) {
+                container.innerHTML = '<div class="weekly-context-card"><div class="week-note">No weekly data for this period.</div></div>';
+                return;
+            }
+
+            container.innerHTML = weeks.slice(-4).map(week => {
+                const bestDay = week.best_day
+                    ? `Best day: ${week.best_day.day} (${week.best_day.tir.toFixed(1)}%% TIR)`
+                    : 'Best day: not available';
+                const delta = week.tir_delta === null || week.tir_delta === undefined
+                    ? 'Baseline'
+                    : `${week.tir_delta > 0 ? '+' : ''}${week.tir_delta.toFixed(1)} pts vs prior week`;
+                return `
+                    <div class="weekly-context-card">
+                        <div class="week-label">Week of ${week.week}</div>
+                        <div class="week-main">${parseFloat(week.tir).toFixed(1)}%% TIR · ${delta}</div>
+                        <div class="week-note">${bestDay}</div>
+                        <div class="week-note">${week.note}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
         function updateHeatmap(heatmapTir) {
             const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
             const fullDayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
@@ -3980,6 +4469,8 @@ def generate_html_report(days=90, output_path=None):
         const modalP90 = modalDayData.map(d => d.p90);
         const modalP25 = modalDayData.map(d => d.p25);
         const modalP75 = modalDayData.map(d => d.p75);
+        const modalTargetLow = modalDayData.map(() => convertGlucose(thresholds.targetLow));
+        const modalTargetHigh = modalDayData.map(() => convertGlucose(thresholds.targetHigh));
         
         // Build modal day datasets
         const modalDayDatasets = [
@@ -4047,6 +4538,32 @@ def generate_html_report(days=90, output_path=None):
                 tension: 0.3,
                 order: 0,
                 yAxisID: 'y'
+            },
+            {
+                label: 'Target Low',
+                data: modalTargetLow,
+                borderColor: colors.inRange,
+                backgroundColor: colors.inRange,
+                borderWidth: 1.5,
+                borderDash: [6, 4],
+                fill: false,
+                pointRadius: 0,
+                tension: 0,
+                order: -2,
+                yAxisID: 'y'
+            },
+            {
+                label: 'Target High',
+                data: modalTargetHigh,
+                borderColor: colors.inRange,
+                backgroundColor: colors.inRange,
+                borderWidth: 1.5,
+                borderDash: [6, 4],
+                fill: false,
+                pointRadius: 0,
+                tension: 0,
+                order: -2,
+                yAxisID: 'y'
             }
         ];
         
@@ -4102,27 +4619,7 @@ def generate_html_report(days=90, output_path=None):
                     legend: { 
                         position: 'top',
                         labels: { 
-                            filter: (item) => ['Median', 'Mean', 'Avg Insulin (U)'].includes(item.text)
-                        }
-                    },
-                    annotation: {
-                        annotations: {
-                            targetLow: {
-                                type: 'line',
-                                yMin: thresholds.targetLow,
-                                yMax: thresholds.targetLow,
-                                borderColor: colors.inRange,
-                                borderWidth: 1,
-                                borderDash: [5, 5]
-                            },
-                            targetHigh: {
-                                type: 'line',
-                                yMin: thresholds.targetHigh,
-                                yMax: thresholds.targetHigh,
-                                borderColor: colors.inRange,
-                                borderWidth: 1,
-                                borderDash: [5, 5]
-                            }
+                            filter: (item) => ['Median', 'Mean', 'Target Low', 'Target High', 'Avg Insulin (U)'].includes(item.text)
                         }
                     }
                 },
@@ -4318,7 +4815,8 @@ def generate_html_report(days=90, output_path=None):
                 }
             }
         });
-        
+        renderWeeklyContext(weeklyStats);
+
         // Insulin Chart - Stacked Bar (Bolus vs Basal)
         if (hasPumpData && dailyInsulinStats.length > 0) {
             const insulinCanvas = document.getElementById('insulinChart');
@@ -4854,8 +5352,10 @@ def generate_html_report(days=90, output_path=None):
     </script>
     
     <!-- Print Button and AGP Link -->
-    <button class="print-button" onclick="window.print()">🖨️ Print / Save PDF</button>
-    <a href="nightscout_agp_report.html" class="agp-button">📋 AGP Report (for Doctor)</a>
+    <div class="report-actions" aria-label="Report actions">
+        <button class="print-button" onclick="window.print()">🖨️ Print / Save PDF</button>
+        <a href="nightscout_agp_report.html" class="agp-button">📋 AGP Report (for Doctor)</a>
+    </div>
 </body>
 </html>
 '''
@@ -4884,7 +5384,7 @@ def generate_html_report(days=90, output_path=None):
         tdd_total = round(tdd_bolus + (scheduled_basal_per_day * days_with_data), 1)
         
         pump_section_html = '''
-        <div class="pump-section chart-section">
+        <div class="pump-section chart-section" id="section-insulin">
             <h2>Insulin Delivery</h2>
             <p style="color: var(--text-secondary); margin-bottom: 15px; font-size: 0.9rem;">
                 Insulin and carb data from your pump/Loop system for this period.
@@ -4915,7 +5415,46 @@ def generate_html_report(days=90, output_path=None):
                round(avg_daily_bolus / avg_daily_total * 100) if avg_daily_total else 0)
     else:
         pump_section_html = ""
-    
+
+    executive_summary_html = '''
+        <section class="executive-summary summary-%s" aria-labelledby="executiveSummaryHeading">
+            <h2 id="executiveSummaryHeading">Executive Summary</h2>
+            <div class="summary-status">%s</div>
+            <ul>
+                %s
+            </ul>
+        </section>
+        ''' % (
+            executive_summary["severity"],
+            executive_summary["status"],
+            "\n                ".join(f"<li>{bullet}</li>" for bullet in executive_summary["bullets"])
+        )
+    goal_status_html = '''
+        <section class="goals-section" aria-labelledby="goalsHeading">
+            <h2 id="goalsHeading">Goal Tracking</h2>
+            <div class="goals-grid">
+                %s
+            </div>
+        </section>
+        ''' % "\n                ".join(
+            '''
+                <div class="goal-card %s">
+                    <div class="goal-label">%s</div>
+                    <div class="goal-value">%s%s</div>
+                    <div class="goal-target">Goal: %s %s%s</div>
+                </div>
+            ''' % (
+                "goal-met" if item["met"] else "goal-missed",
+                item["label"],
+                item["actual"],
+                item["unit"],
+                item["direction"],
+                item["target"],
+                item["unit"]
+            )
+            for item in goal_status
+        )
+
     html_content = html_template % {
         "first_date": first_date,
         "last_date": last_date,
@@ -4951,7 +5490,10 @@ def generate_html_report(days=90, output_path=None):
         "is_mmol_js": "true" if is_mmol else "false",
         "initial_days": days,
         "alerts_json": json.dumps(alerts),
+        "executive_summary_html": executive_summary_html,
+        "goal_status_html": goal_status_html,
         "pump_section_html": pump_section_html,
+        "pump_nav_link": '<a href="#section-insulin">Insulin</a>' if pump_section_html else "",
         "has_pump_data_js": "true" if pump_data_available else "false",
         "bolus_markers_json": json.dumps(bolus_markers),
         "carb_markers_json": json.dumps(carb_markers),
@@ -5855,6 +6397,247 @@ def get_treatments(hours=24, event_types=None, limit=20):
         return {"error": f"Failed to fetch treatments: {e}"}
 
 
+def _treatment_search_text(treatment):
+    """Build searchable text from Nightscout treatment fields."""
+    parts = [
+        treatment.get("eventType"),
+        treatment.get("notes"),
+        treatment.get("enteredBy"),
+        treatment.get("foodType"),
+        treatment.get("reason")
+    ]
+    return " ".join(str(part) for part in parts if part).lower()
+
+
+def _average_reading_between(conn, start_ms, end_ms):
+    row = conn.execute(
+        "SELECT AVG(sgv), COUNT(*), MIN(sgv), MAX(sgv) FROM readings WHERE date_ms BETWEEN ? AND ? AND sgv > 0",
+        (start_ms, end_ms)
+    ).fetchone()
+    avg, count, min_sgv, max_sgv = row
+    if not count:
+        return None
+    return {
+        "average": avg,
+        "count": count,
+        "min": min_sgv,
+        "max": max_sgv
+    }
+
+
+def get_event_correlations(tag=None, days=90, window_minutes=180, limit=20):
+    """Analyze glucose response around existing Nightscout treatments/events."""
+    caps = detect_pump_capabilities()
+    if not caps.get("has_treatments"):
+        return {
+            "error": "No treatment data available",
+            "message": "Event correlations use existing Nightscout treatment/event entries. "
+                      "This Nightscout instance does not appear to have treatment data.",
+            "cgm_only": True
+        }
+
+    if not ensure_fresh_data(days):
+        return {"error": "Could not fetch data from Nightscout. Check your NIGHTSCOUT_URL."}
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        resp = requests.get(
+            f"{API_ROOT}/treatments.json",
+            params={"count": 5000, "find[created_at][$gte]": cutoff_str},
+            timeout=30
+        )
+        resp.raise_for_status()
+        treatments = resp.json()
+    except requests.RequestException as e:
+        return {"error": f"Failed to fetch treatments: {e}"}
+
+    if not isinstance(treatments, list):
+        return {"error": "Unexpected treatments response: expected a list"}
+
+    tag_text = tag.lower() if tag else None
+    matches = []
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        for treatment in treatments:
+            if not isinstance(treatment, dict):
+                continue
+            search_text = _treatment_search_text(treatment)
+            if tag_text and tag_text not in search_text:
+                continue
+            if not tag_text and not (
+                treatment.get("carbs")
+                or "Meal" in treatment.get("eventType", "")
+                or treatment.get("notes")
+            ):
+                continue
+
+            event_dt = _parse_treatment_timestamp(treatment.get("created_at"))
+            if event_dt is None:
+                continue
+
+            event_ms = int(event_dt.timestamp() * 1000)
+            before = _average_reading_between(
+                conn,
+                event_ms - (30 * 60 * 1000),
+                event_ms
+            )
+            after = _average_reading_between(
+                conn,
+                event_ms,
+                event_ms + (window_minutes * 60 * 1000)
+            )
+            if not before or not after:
+                continue
+
+            delta = after["average"] - before["average"]
+            matches.append({
+                "timestamp": treatment.get("created_at"),
+                "event_type": treatment.get("eventType", "Unknown"),
+                "notes": treatment.get("notes"),
+                "carbs": treatment.get("carbs"),
+                "insulin": treatment.get("insulin"),
+                "baseline_average": convert_glucose(round(before["average"], 1)),
+                "post_event_average": convert_glucose(round(after["average"], 1)),
+                "post_event_peak": convert_glucose(after["max"]),
+                "post_event_low": convert_glucose(after["min"]),
+                "delta": convert_glucose(round(delta, 1)),
+                "readings_after": after["count"]
+            })
+    finally:
+        conn.close()
+
+    limited_matches = matches[:limit]
+    if matches:
+        avg_delta = sum(item["delta"] for item in matches) / len(matches)
+        avg_peak = sum(item["post_event_peak"] for item in matches) / len(matches)
+        summary = {
+            "matched_events": len(matches),
+            "returned_events": len(limited_matches),
+            "average_delta": round(avg_delta, 1),
+            "average_post_event_peak": round(avg_peak, 1),
+            "unit": get_unit_label(),
+            "note": "Uses existing Nightscout treatment/event entries; no local annotations are stored."
+        }
+    else:
+        summary = {
+            "matched_events": 0,
+            "returned_events": 0,
+            "unit": get_unit_label(),
+            "note": "No matching events had enough surrounding CGM data for correlation."
+        }
+
+    return {
+        "tag": tag,
+        "period_days": days,
+        "window_minutes": window_minutes,
+        "events": limited_matches,
+        "summary": summary
+    }
+
+
+def _parse_treatment_timestamp(timestamp):
+    """Parse a Nightscout treatment timestamp into a UTC-aware datetime."""
+    if not isinstance(timestamp, str) or not timestamp:
+        return None
+
+    try:
+        normalized = timestamp.strip()
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _build_change_age_metric(treatments, event_type):
+    """Build CAGE/SAGE/IAGE style metric for one treatment event type."""
+    timestamps = []
+    for treatment in treatments:
+        if not isinstance(treatment, dict):
+            continue
+        dt = _parse_treatment_timestamp(treatment.get("created_at"))
+        if dt:
+            timestamps.append(dt)
+
+    timestamps.sort(reverse=True)
+    if not timestamps:
+        return {
+            "event_type": event_type,
+            "last_change": None,
+            "age_hours": None,
+            "age_days": None,
+            "average_interval_days": None,
+            "changes_observed": 0
+        }
+
+    now = datetime.now(timezone.utc)
+    age_hours = (now - timestamps[0]).total_seconds() / 3600
+    average_interval_days = None
+    if len(timestamps) > 1:
+        intervals_hours = [
+            (timestamps[i] - timestamps[i + 1]).total_seconds() / 3600
+            for i in range(len(timestamps) - 1)
+        ]
+        average_interval_days = round((sum(intervals_hours) / len(intervals_hours)) / 24, 2)
+
+    return {
+        "event_type": event_type,
+        "last_change": timestamps[0].isoformat(),
+        "age_hours": round(age_hours, 1),
+        "age_days": round(age_hours / 24, 2),
+        "average_interval_days": average_interval_days,
+        "changes_observed": len(timestamps)
+    }
+
+
+def get_change_ages(limit=100):
+    """Get CAGE/SAGE/IAGE metrics from Nightscout treatments."""
+    if not isinstance(limit, int) or limit < 1:
+        return {"error": "count must be a positive integer"}
+
+    caps = detect_pump_capabilities()
+    if not caps.get("has_treatments"):
+        return {
+            "error": "No treatment data available",
+            "message": "This Nightscout instance doesn't appear to have treatment data. "
+                      "CAGE/SAGE/IAGE requires treatment entries uploading to Nightscout.",
+            "cgm_only": True
+        }
+
+    metric_types = {
+        "cage": "Site Change",
+        "sage": "Sensor Change",
+        "iage": "Insulin Change",
+    }
+
+    try:
+        result = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "metrics": {}
+        }
+        for key, event_type in metric_types.items():
+            resp = requests.get(
+                f"{API_ROOT}/treatments.json",
+                params={"count": limit, "find[eventType]": event_type},
+                timeout=15
+            )
+            resp.raise_for_status()
+            treatments = resp.json() or []
+            if not isinstance(treatments, list):
+                return {"error": f"Unexpected treatments response for {event_type}: expected a list"}
+            result["metrics"][key] = _build_change_age_metric(treatments, event_type)
+
+        return result
+    except (requests.RequestException, ValueError) as e:
+        return {"error": f"Failed to fetch change ages: {e}"}
+
+
 def get_profile():
     """Get pump profile settings (basal rates, ISF, carb ratios, targets)."""
     # Check if profile data is available
@@ -5991,6 +6774,30 @@ def get_profile():
         return {"error": f"Failed to fetch profile: {e}"}
 
 
+def _positive_int(value):
+    """Argparse type for positive integer options."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _positive_float(value):
+    """Argparse type for positive numeric goal options."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("must be a positive number") from exc
+
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number")
+    return parsed
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Nightscout CGM data fetcher and analyzer"
@@ -6015,6 +6822,20 @@ def main():
         "--days", type=int, default=90,
         help="Days of data to fetch (default: 90)"
     )
+
+    # Auto-refresh command - configure refresh-on-query behavior
+    auto_refresh_parser = subparsers.add_parser(
+        "auto-refresh", help="View or configure refresh-on-query sync"
+    )
+    auto_refresh_subparsers = auto_refresh_parser.add_subparsers(dest="auto_refresh_action")
+    auto_refresh_subparsers.add_parser("view", help="View auto-refresh settings")
+    auto_refresh_set_parser = auto_refresh_subparsers.add_parser("set", help="Set stale-data refresh interval")
+    auto_refresh_set_parser.add_argument(
+        "--minutes", type=_positive_int, required=True,
+        help="Refresh before queries when the newest local reading is older than this"
+    )
+    auto_refresh_subparsers.add_parser("on", help="Enable refresh-on-query sync")
+    auto_refresh_subparsers.add_parser("off", help="Disable refresh-on-query sync")
 
     # Query command - flexible pattern analysis
     query_parser = subparsers.add_parser(
@@ -6189,6 +7010,19 @@ def main():
         help="Open the report in default browser after generating"
     )
 
+    # Goals command - view/set/clear report goals
+    goals_parser = subparsers.add_parser(
+        "goals", help="View, set, or clear glucose goals"
+    )
+    goals_subparsers = goals_parser.add_subparsers(dest="goals_action")
+    goals_subparsers.add_parser("view", help="View configured goals")
+    goals_set_parser = goals_subparsers.add_parser("set", help="Set one or more goals")
+    goals_set_parser.add_argument("--tir", type=_positive_float, help="Minimum Time in Range percentage")
+    goals_set_parser.add_argument("--cv", type=_positive_float, help="Maximum glucose variability CV percentage")
+    goals_set_parser.add_argument("--gmi", type=_positive_float, help="Maximum GMI percentage")
+    goals_set_parser.add_argument("--average", type=_positive_float, help="Maximum average glucose in mg/dL")
+    goals_subparsers.add_parser("clear", help="Clear custom goals and use defaults")
+
     # Pump status command
     subparsers.add_parser(
         "pump", help="Get current pump status (IOB, COB, predicted glucose)"
@@ -6201,6 +7035,36 @@ def main():
     treatments_parser.add_argument(
         "--hours", type=int, default=24,
         help="Number of hours to look back (default: 24)"
+    )
+
+    # Events command
+    events_parser = subparsers.add_parser(
+        "events", help="Correlate glucose response around Nightscout treatments/events"
+    )
+    events_parser.add_argument(
+        "--tag", type=str,
+        help="Match text in event type, notes, enteredBy, foodType, or reason"
+    )
+    events_parser.add_argument(
+        "--days", type=int, default=90,
+        help="Number of days to analyze (default: 90)"
+    )
+    events_parser.add_argument(
+        "--window-minutes", type=_positive_int, default=180,
+        help="Post-event glucose window in minutes (default: 180)"
+    )
+    events_parser.add_argument(
+        "--limit", type=_positive_int, default=20,
+        help="Maximum events to return (default: 20)"
+    )
+
+    # CAGE/SAGE/IAGE command
+    ages_parser = subparsers.add_parser(
+        "ages", help="Get CAGE/SAGE/IAGE from treatment events"
+    )
+    ages_parser.add_argument(
+        "--count", type=_positive_int, default=100,
+        help="Number of events to fetch per change type (default: 100)"
     )
 
     # Profile command
@@ -6216,6 +7080,15 @@ def main():
         result = analyze_cgm(args.days)
     elif args.command == "refresh":
         result = fetch_and_store(args.days)
+    elif args.command == "auto-refresh":
+        if args.auto_refresh_action in (None, "view"):
+            result = get_auto_refresh_settings()
+        elif args.auto_refresh_action == "set":
+            result = set_auto_refresh(minutes=args.minutes, enabled=True)
+        elif args.auto_refresh_action == "on":
+            result = set_auto_refresh(enabled=True)
+        elif args.auto_refresh_action == "off":
+            result = set_auto_refresh(enabled=False)
     elif args.command == "query":
         day = args.day
         if day and day.isdigit():
@@ -6293,10 +7166,34 @@ def main():
             if args.open:
                 import webbrowser
                 webbrowser.open(f"file://{result['report']}")
+    elif args.command == "goals":
+        if args.goals_action in (None, "view"):
+            result = {"goals": get_goals(), "average_glucose_unit": "mg/dL"}
+        elif args.goals_action == "set":
+            if all(value is None for value in (args.tir, args.cv, args.gmi, args.average)):
+                result = {"error": "Set at least one goal: --tir, --cv, --gmi, or --average"}
+            else:
+                result = set_goals(
+                    tir=args.tir,
+                    cv=args.cv,
+                    gmi=args.gmi,
+                    average_glucose=args.average
+                )
+        elif args.goals_action == "clear":
+            result = clear_goals()
     elif args.command == "pump":
         result = get_pump_status()
     elif args.command == "treatments":
         result = get_treatments(hours=args.hours)
+    elif args.command == "events":
+        result = get_event_correlations(
+            tag=args.tag,
+            days=args.days,
+            window_minutes=args.window_minutes,
+            limit=args.limit
+        )
+    elif args.command == "ages":
+        result = get_change_ages(limit=args.count)
     elif args.command == "profile":
         result = get_profile()
     else:
