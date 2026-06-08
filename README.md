@@ -65,17 +65,19 @@ python scripts/cgm.py report --days 90 --open
 
 - **Date Range Controls** - Quick buttons for 7d/14d/30d/90d/6mo/1yr/All, plus custom date pickers
 - **All charts update dynamically** - No server needed, everything recalculates in your browser
+- **Executive Summary** - Deterministic status and concise bullets at the top of the report
+- **Section Navigation** - Sticky anchor navigation for long reports
 - **Print / Save PDF** - Use the report action button or your browser's print dialog to save a PDF
 - **Key Stats Dashboard** - Time-in-Range %, GMI (estimated A1C), CV (variability), average glucose
 - **Goal Tracking** - Configurable targets for TIR, CV, GMI, and average glucose
 - **7 Interactive Charts:**
   - Time-in-Range pie chart
-  - Modal Day (typical 24-hour profile with percentile bands)
+  - Modal Day (typical 24-hour profile with percentile bands and target range lines)
   - Daily trends (average glucose + TIR per day)
   - Day of week comparison
   - Glucose distribution histogram
   - Time-in-Range heatmap (day × hour) with hover tooltips
-  - Weekly summary
+  - Weekly summary with week-over-week TIR delta, best day, and context notes
 - **Insulin Delivery Section** (for Loop/OpenAPS users):
   - Avg Daily Total (bolus + basal TDD)
   - Bolus/Basal breakdown with ratio
@@ -124,10 +126,12 @@ python scripts/cgm.py report --days 90 --open
 # View or set local report goals
 python scripts/cgm.py goals view
 python scripts/cgm.py goals set --tir 75 --cv 34 --gmi 6.8 --average 145
+python scripts/cgm.py goals clear
 
 # View or change refresh-on-query sync interval
 python scripts/cgm.py auto-refresh view
 python scripts/cgm.py auto-refresh set --minutes 15
+python scripts/cgm.py auto-refresh off
 
 # Current glucose
 python scripts/cgm.py current
@@ -168,6 +172,91 @@ python scripts/cgm.py ages --count 100
 python scripts/cgm.py events --tag pizza --days 90
 ```
 
+## Report Guidance, Goals, and Event Context
+
+The HTML report is designed to be useful without becoming a medical decision system:
+
+- **Executive Summary** uses deterministic rules to summarize the selected date range. It highlights time in range, time below range, variability, and trend-alert context without generating medical advice.
+- **Goal Tracking** compares the report period against local goals for Time in Range, CV, GMI, and average glucose. Defaults are based on common clinical targets, and you can override them with `goals set`.
+- **Weekly Context** shows recent week-over-week Time in Range deltas, the best day in each week, and a short note so the weekly chart is easier to interpret.
+- **Modal Day Target Lines** display the configured target-low and target-high thresholds directly on the 24-hour profile chart.
+- **Print / Save PDF** uses the browser's built-in print dialog and print-friendly CSS, avoiding extra PDF dependencies.
+- **Event Correlations** use existing Nightscout treatment/event entries such as meal boluses, carb entries, notes, or `foodType` values. The skill does not create or edit annotations locally or in Nightscout.
+
+### Goal Tracking
+
+Goals are stored locally in `config.json` and used by generated reports:
+
+```bash
+# Show active goals and defaults
+python scripts/cgm.py goals
+python scripts/cgm.py goals view
+
+# Set one or more goals
+python scripts/cgm.py goals set --tir 75
+python scripts/cgm.py goals set --tir 75 --cv 34 --gmi 6.8 --average 145
+
+# Return to defaults
+python scripts/cgm.py goals clear
+```
+
+Goal fields:
+
+| Option | Meaning | Direction |
+|--------|---------|-----------|
+| `--tir` | Time in Range percentage | Higher is better |
+| `--cv` | Coefficient of variation percentage | Lower is better |
+| `--gmi` | Glucose Management Indicator percentage | Lower is better |
+| `--average` | Average glucose in mg/dL | Lower is better |
+
+### Refresh-on-Query Sync
+
+This skill does not run a daemon. Instead, read-only analysis/report commands can refresh stale local data before running:
+
+```bash
+# Show current refresh-on-query settings
+python scripts/cgm.py auto-refresh
+python scripts/cgm.py auto-refresh view
+
+# Sync before queries when local data is older than 15 minutes
+python scripts/cgm.py auto-refresh set --minutes 15
+
+# Disable or re-enable automatic stale-data refresh
+python scripts/cgm.py auto-refresh off
+python scripts/cgm.py auto-refresh on
+```
+
+Use `refresh --days N` when you want an explicit manual sync.
+
+### Existing Nightscout Event Correlations
+
+If your Nightscout has treatment/event data, you can ask how glucose behaved after matching events:
+
+```bash
+python scripts/cgm.py events --tag pizza --days 90
+python scripts/cgm.py events --tag workout --days 30 --window-minutes 240
+```
+
+The command matches text in Nightscout `eventType`, `notes`, `enteredBy`, `foodType`, and `reason`, compares the 30-minute baseline before the event to the post-event window, and reports average/peak/low response. It is analysis-only; it does not maintain a separate local annotation database.
+
+### Pump Change Ages
+
+For Loop/OpenAPS-style Nightscout instances that upload treatment events:
+
+```bash
+python scripts/cgm.py ages --count 100
+```
+
+The command reports:
+
+| Metric | Nightscout event |
+|--------|------------------|
+| CAGE | `Site Change` |
+| SAGE | `Sensor Change` |
+| IAGE | `Insulin Change` |
+
+CGM-only Nightscout instances return a structured "no treatment data" message instead of failing.
+
 ## Privacy & Data Architecture
 
 **Your glucose data stays on your machine.** Here's how it works:
@@ -191,6 +280,7 @@ python scripts/cgm.py events --tag pizza --days 90
 
 **What stays local:**
 - ✅ SQLite database with your glucose readings (stored in the skill directory)
+- ✅ Local `config.json` settings such as goals and refresh-on-query interval
 - ✅ All analysis (statistics, time-in-range, GMI, patterns) computed locally by Python
 - ✅ The script runs entirely on your machine
 
@@ -394,6 +484,20 @@ python scripts/cgm.py agp --days 14 --open
 # Generate AGP report with custom period
 python scripts/cgm.py agp --days 30 --output ~/agp_report.html
 
+# Configure local report goals
+python scripts/cgm.py goals view
+python scripts/cgm.py goals set --tir 75 --cv 34 --gmi 6.8 --average 145
+
+# Configure refresh-on-query sync
+python scripts/cgm.py auto-refresh view
+python scripts/cgm.py auto-refresh set --minutes 15
+
+# Correlate existing Nightscout events/treatments with glucose response
+python scripts/cgm.py events --tag pizza --days 90
+
+# Site/sensor/insulin change ages from treatment events
+python scripts/cgm.py ages --count 100
+
 # Refresh data from Nightscout
 python scripts/cgm.py refresh --days 90
 ```
@@ -430,19 +534,24 @@ python scripts/cgm.py report --days 90 --open
 ```
 
 The report includes:
+- 🧭 **Section navigation** - Sticky links for jumping through long reports
+- 📝 **Executive summary** - Deterministic status and concise report highlights
+- 🎯 **Goal tracking** - Configurable TIR, CV, GMI, and average glucose goals
 - 📊 **Time-in-Range pie chart** - Visual breakdown of glucose distribution
-- 📈 **Modal Day chart** - Your typical 24-hour glucose profile with percentile bands
+- 📈 **Modal Day chart** - Your typical 24-hour glucose profile with percentile bands and target range lines
 - 📅 **Daily trends** - Day-by-day average glucose and time-in-range
 - 🗓️ **Day of week comparison** - Which days are your best/worst
 - 📉 **Glucose distribution histogram** - See your glucose spread
 - 🔥 **Time-in-Range heatmap** - Identify problem times at a glance
-- 📆 **Weekly summary** - Track progress over weeks
+- 📆 **Weekly summary** - Track progress over weeks with TIR delta, best day, and context notes
+- 🖨️ **Print / Save PDF** - Browser-based PDF export path for sharing or records
 
 The report is:
 - **Self-contained** - Single HTML file with embedded Chart.js
 - **Privacy-first** - All data stays local, no external servers
 - **Interactive** - Hover for details, responsive design
 - **Shareable** - Open in any browser, send to your doctor
+- **Print-friendly** - Report actions hide in print and layout avoids floating control overlap
 
 ## Output Examples
 
@@ -583,7 +692,7 @@ This skill reads your `DISPLAY_UNITS` setting and converts automatically - you d
 
 ### Running Tests
 
-The skill has 255+ tests covering all functionality:
+The skill has 281+ tests covering all functionality:
 
 ```bash
 cd ~/.copilot/skills/nightscout-cgm
@@ -614,5 +723,6 @@ python -m pytest tests/test_real_data.py -v
 | test_cli.py | Command-line argument parsing |
 | test_edge_cases.py | Error handling, boundaries |
 | test_real_data.py | Tests using real Nightscout API responses |
-| test_pump.py | Pump commands, treatments, profile |
+| test_pump.py | Pump commands, treatments, profile, event correlations, change ages |
+| test_report.py | HTML/AGP reports, report UX, goal tracking |
 | test_coverage_gaps.py | Error handling edge cases |

@@ -1,88 +1,37 @@
-# Nightscout CGM Skill - Planned Improvements
+# Nightscout CGM Skill - Improvement Status
 
-This document tracks potential enhancements to the Nightscout CGM Skill.
+This document records the current enhancement status and the scope decisions for this repository. The skill is intentionally an on-demand AI/CLI tool, not a long-running desktop or mobile application.
 
-## High Impact
+## Implemented Capabilities
 
-### 1. Meal/Event Annotations
-Let users tag meals, exercise, insulin doses and see correlations.
-- "What happens when I eat pizza?"
-- "Show me my post-workout patterns"
-- Store annotations in local SQLite alongside readings
+| Area | Issue | Current behavior |
+|------|-------|------------------|
+| Meal/event correlations | [#4](https://github.com/shanselman/nightscout-cgm-skill/issues/4) | `events --tag TEXT` analyzes glucose response around existing Nightscout treatment/event data. It does not create a separate local annotation editor. |
+| Trend alerts | [#5](https://github.com/shanselman/nightscout-cgm-skill/issues/5) | `alerts --days N` surfaces recurring low/high patterns from local CGM data. |
+| Period comparison | [#6](https://github.com/shanselman/nightscout-cgm-skill/issues/6) | `compare --period1 P1 --period2 P2` compares TIR, GMI, average glucose, variability, and related deltas. |
+| AGP reports | [#7](https://github.com/shanselman/nightscout-cgm-skill/issues/7) | `agp --days N` generates a clinical-style Ambulatory Glucose Profile report. |
+| PDF export | [#8](https://github.com/shanselman/nightscout-cgm-skill/issues/8) | HTML reports include print-friendly CSS and a browser Print / Save PDF action, avoiding extra PDF dependencies. |
+| Goal tracking | [#9](https://github.com/shanselman/nightscout-cgm-skill/issues/9) | `goals view/set/clear` stores local goals for TIR, CV, GMI, and average glucose and renders goal status cards in reports. |
+| Refresh-on-query | [#10](https://github.com/shanselman/nightscout-cgm-skill/issues/10) | `auto-refresh view/set/on/off` configures stale-data refresh before read-only commands. This replaces daemon behavior with an on-demand model. |
+| CAGE/SAGE/IAGE | [#36](https://github.com/shanselman/nightscout-cgm-skill/issues/36) | `ages --count N` reports site, sensor, and insulin change ages from Nightscout treatment events. |
+| Report navigation | [#29](https://github.com/shanselman/nightscout-cgm-skill/issues/29) | Reports include sticky section navigation and anchors for long pages. |
+| Floating report actions | [#28](https://github.com/shanselman/nightscout-cgm-skill/issues/28) | Report actions are responsive, print-safe, and no longer overlap content. |
+| Modal Day target lines | [#27](https://github.com/shanselman/nightscout-cgm-skill/issues/27) | Modal Day charts include target low/high lines using native Chart.js datasets. |
+| Executive summary | [#26](https://github.com/shanselman/nightscout-cgm-skill/issues/26) | Reports include deterministic summary status and concise bullets. |
+| Weekly context | [#25](https://github.com/shanselman/nightscout-cgm-skill/issues/25) | Weekly summary includes TIR delta, best day, and context notes. |
 
-### 2. Trend Alerts Summary
-Proactive pattern warnings based on recent data.
-- "You've had 3 lows after 2am this week"
-- "Friday lunches are consistently high"
-- Surface concerning patterns automatically
+## Explicitly Deferred or Out of Scope
 
-### 3. Compare Periods
-Side-by-side comparison of different time periods.
-- "Compare this week to last week"
-- "January vs December"
-- Show delta in TIR, average, variability
+| Area | Issue | Decision |
+|------|-------|----------|
+| Notification integration | [#11](https://github.com/shanselman/nightscout-cgm-skill/issues/11) | Deferred as out of scope. Real notifications imply a daemon, scheduler, or OS-specific desktop integration. |
+| Multiple profiles | [#12](https://github.com/shanselman/nightscout-cgm-skill/issues/12) | Deferred as out of scope. The safer model is one Nightscout profile per skill install/environment. |
+| ML pattern detection | [#13](https://github.com/shanselman/nightscout-cgm-skill/issues/13) | Deferred as out of scope. Deterministic, explainable local analysis is preferred over adding an ML dependency/model layer. |
 
-## Report Enhancements
+## Scope Principles
 
-### 4. Ambulatory Glucose Profile (AGP)
-The standard clinical report format that doctors use.
-- Matches the format endocrinologists expect
-- Easy to share with healthcare providers
-- Industry-standard percentile bands
-
-### 5. Export to PDF
-One-click PDF generation for doctor visits.
-- Print-friendly formatting
-- Include key metrics and charts
-- Date range selection
-
-### 6. Goal Tracking
-Set personal goals and track progress over time.
-- Set a TIR goal (e.g., 70%)
-- Show progress trend over weeks/months
-- Celebrate milestones
-
-## Quality of Life
-
-### 7. Auto-refresh Daemon
-Background sync so data is always current.
-- Periodic fetch from Nightscout
-- Configurable interval
-- Low resource usage
-
-### 8. Notification Integration
-System notifications for concerning patterns.
-- "You've been high for 2 hours"
-- Configurable thresholds
-- Desktop/terminal notifications
-
-### 9. Multiple Profiles
-Support family members with separate Nightscout instances.
-- Switch between profiles
-- Separate databases per profile
-- Named configurations
-
-## Data Science
-
-### 10. ML Pattern Detection
-Machine learning to find non-obvious patterns.
-- "You tend to go high 3 hours after meals over 50g carbs"
-- Day-of-week and time-of-day correlations
-- Predictive insights
-
----
-
-## Status
-
-| # | Feature | Issue | Status |
-|---|---------|-------|--------|
-| 1 | Meal/Event Annotations | [#4](https://github.com/shanselman/nightscout-cgm-skill/issues/4) | Planned |
-| 2 | Trend Alerts Summary | [#5](https://github.com/shanselman/nightscout-cgm-skill/issues/5) | Planned |
-| 3 | Compare Periods | [#6](https://github.com/shanselman/nightscout-cgm-skill/issues/6) | Planned |
-| 4 | AGP Report | [#7](https://github.com/shanselman/nightscout-cgm-skill/issues/7) | Planned |
-| 5 | Export to PDF | [#8](https://github.com/shanselman/nightscout-cgm-skill/issues/8) | Planned |
-| 6 | Goal Tracking | [#9](https://github.com/shanselman/nightscout-cgm-skill/issues/9) | Planned |
-| 7 | Auto-refresh Daemon | [#10](https://github.com/shanselman/nightscout-cgm-skill/issues/10) | Planned |
-| 8 | Notification Integration | [#11](https://github.com/shanselman/nightscout-cgm-skill/issues/11) | Planned |
-| 9 | Multiple Profiles | [#12](https://github.com/shanselman/nightscout-cgm-skill/issues/12) | Planned |
-| 10 | ML Pattern Detection | [#13](https://github.com/shanselman/nightscout-cgm-skill/issues/13) | Planned |
+- Keep the skill privacy-first and local.
+- Prefer deterministic, explainable analysis over opaque inference.
+- Avoid background services unless this repository intentionally becomes an application.
+- Avoid new heavy dependencies when browser, Python standard library, or existing data can solve the problem.
+- Treat Nightscout as the source of truth for treatments/events instead of maintaining a second annotation system.

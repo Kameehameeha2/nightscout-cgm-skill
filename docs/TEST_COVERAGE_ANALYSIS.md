@@ -2,133 +2,93 @@
 
 ## Summary
 
-**Coverage:** 85% line coverage (1500 statements, 220 missing)
-**Test Count:** 255 tests
-**Branch Coverage:** 82%
+Current validation command:
+
+```bash
+python -m pytest tests/ --cov=scripts --cov-report=term-missing --cov-fail-under=80
+```
+
+Latest local result:
+
+| Metric | Result |
+|--------|--------|
+| Tests | 281 passed |
+| Line coverage | 84.40% |
+| Coverage threshold | 80% |
+| Covered statements | 1,563 / 1,852 |
+
+Branch coverage is not measured by the default coverage command.
 
 ## Assessment
 
-The codebase has **excellent test coverage** with a comprehensive test suite that covers all critical functionality.
+The codebase has strong coverage for the core skill behavior: local data storage, Nightscout fetches, analysis, reports, CLI parsing, pump/treatment integrations, and error handling. Coverage remains comfortably above the enforced threshold while keeping tests focused on user-visible behavior.
 
-## What's Well Covered (✅)
+## What's Well Covered
 
-### Core Functionality (100% coverage)
-- **Analysis Functions:** `analyze_cgm()`, `get_stats()`, `get_time_in_range()` - fully tested
-- **Pattern Detection:** `find_patterns()`, `query_patterns()` - comprehensive edge case coverage
-- **Data Queries:** `view_day()`, `find_worst_days()` - tested with various filters
-- **Comparison:** `compare_periods()`, `parse_period()` - tested with all period formats
+### Core Analysis
 
-### Data Management (95%+ coverage)
-- **Database Operations:** Create, insert, query, deduplication - well tested
-- **API Integration:** Fetch from Nightscout, error handling, URL normalization
-- **Data Integrity:** Missing fields, null values, invalid data - comprehensive edge cases
+- `analyze_cgm()`, `get_stats()`, and `get_time_in_range()`
+- Pattern detection and flexible queries
+- Specific-day analysis and worst-day ranking
+- Period parsing and period comparison
 
-### Visualization & Reports (90%+ coverage)
-- **Charts:** Sparklines, heatmaps, day charts, week charts - all tested
-- **HTML Reports:** Standard and AGP reports with interactive features
-- **Chart.js Integration:** Data formatting, color schemes, tooltips
+### Data Management
 
-### CLI & Commands (95%+ coverage)  
-- **Argument Parsing:** All commands and options tested
-- **Command Execution:** Current, analyze, refresh, query, patterns, day, worst, chart
-- **Output Formats:** JSON output, human-readable output
+- SQLite database creation and deduplication
+- Nightscout fetch/store behavior
+- Stale-data refresh-on-query behavior
+- Missing fields, null values, invalid readings, and API failures
 
-### Pump/Treatment Features (90%+ coverage)
-- **Capability Detection:** Auto-detect pump/Loop data with caching
-- **Pump Status:** Retrieve and parse pump data
-- **Treatments:** Fetch and filter treatments by type and time
-- **Profile Data:** Basal rates, loop settings, override presets
+### Reports and Visualizations
 
-### Edge Cases & Error Handling (85%+ coverage)
-- **Network Errors:** Graceful handling of API failures
-- **Invalid Data:** Missing fields, malformed JSON, extreme values
-- **Date Parsing:** Multiple formats, invalid dates, edge cases
-- **Boundary Conditions:** Empty datasets, single readings, very large date ranges
+- Terminal sparklines, heatmaps, day charts, and week charts
+- Interactive HTML report generation
+- AGP report generation
+- Modal Day target range lines
+- Sticky section navigation
+- Executive summary rendering
+- Weekly context rendering
+- Goal tracking cards
+- Floating report action layout and print/PDF affordances
 
-## What's Not Covered (15% remaining)
+### CLI Commands
 
-### 1. Setup/Initialization Errors (9 lines)
-**Lines 23-25, 30-35**
-- ImportError when requests library not installed
-- Error messages when NIGHTSCOUT_URL not set
-- **Reason not tested:** Only occurs in broken environments, not during normal operation
-- **Risk:** Low - these are fail-fast errors at startup
+- Argument parsing and dispatch for core analysis commands
+- `goals view/set/clear`
+- `auto-refresh view/set/on/off`
+- `events --tag`
+- `ages --count`
+- Pump, treatments, profile, reports, AGP, alerts, charts, and comparisons
 
-### 2. Terminal Color Output (29 lines)
-**Lines 1208-1248**
-- ANSI color codes for terminal charts in `show_day_chart()`
-- Color formatting for in-range, low, high values
-- **Reason not tested:** Hard to test ANSI terminal output meaningfully; ASCII version is tested
-- **Risk:** Very low - cosmetic feature, doesn't affect functionality
+### Pump and Treatment Features
 
-### 3. Auto-Sync Messaging (8 lines)
-**Lines 313-321**  
-- Print statements when auto-syncing stale data
-- Success/warning messages after sync
-- **Reason not tested:** Print output from auto-sync feature, logic is tested
-- **Risk:** Low - informational messages only
+- Capability detection and CGM-only fallback behavior
+- Pump status parsing
+- Treatment categorization
+- Existing Nightscout event correlations
+- CAGE/SAGE/IAGE treatment event parsing
+- Profile data parsing
 
-### 4. Cache Edge Cases (2 lines)
-**Lines 161-162**
-- ValueError handling for malformed cache timestamps
-- **Reason not tested:** Rare edge case of corrupted cache file
-- **Risk:** Low - fallback triggers cache refresh
+## Remaining Coverage Gaps
 
-### 5. CLI Main Entry Point (18 lines)
-**Lines 5912-5956**
-- Main entry point argument parsing errors
-- sys.exit() calls for invalid commands
-- **Reason not tested:** Integration-level testing, command parsing is tested
-- **Risk:** Low - command parsing logic is fully tested in unit tests
+The uncovered lines are mostly lower-risk paths:
 
-### 6. Period Parsing Edge Cases (7 lines)
-**Lines 558-565, 587**
-- "N days ago" format parsing
-- Error handling for unparseable periods
-- **Reason not tested:** Less commonly used feature
-- **Risk:** Low - error handling tested, common formats covered
+- Startup failures such as missing dependencies or missing environment configuration
+- Terminal color formatting branches
+- Informational print messages around sync/report operations
+- Network error branches that mirror other tested request failures
+- Optional fields in complex Nightscout pump/profile payloads
+- CLI help/exit paths already indirectly covered by parser tests
 
-### 7. Less Common Code Paths (147 lines scattered)
-- Some `if` branches in complex functions
-- Error recovery in nested try/except blocks
-- Edge cases in pump/treatment data parsing
-- Optional parameters in various functions
+These gaps are acceptable because the business logic and user-facing command behavior are directly tested.
 
 ## Recommendations
 
-### ✅ Current Coverage is Sufficient
-
-The test suite is **comprehensive and well-designed** with:
-- 255 tests covering all critical paths
-- Excellent coverage of core business logic
-- Strong error handling and edge case testing
-- Good balance of unit and integration tests
-
-### 🎯 Optional Improvements (Low Priority)
-
-If you want to push coverage higher:
-
-1. **Add CLI integration tests** - Test main() entry point with subprocess
-2. **Add "N days ago" parsing test** - Complete period parsing coverage
-3. **Add cache corruption recovery test** - Test ValueError handling in cache
-
-However, these would provide **diminishing returns** - the current 85% coverage captures all important functionality.
+- Keep the `--cov-fail-under=80` gate.
+- Add tests with each new command or report feature.
+- Prefer focused tests for deterministic helpers and generated HTML snippets.
+- Add integration smoke tests only where local credentials/data are available; avoid requiring private Nightscout data in CI.
 
 ## Conclusion
 
-**The test coverage is excellent.** The 15% gap consists mostly of:
-- Error paths that only trigger in broken environments
-- Terminal UI formatting (ANSI colors)
-- Informational print statements  
-- CLI integration layers already covered by unit tests
-
-All **critical functionality is thoroughly tested** including:
-- ✅ Data fetching and storage
-- ✅ Analysis and calculations
-- ✅ Pattern detection
-- ✅ Chart generation
-- ✅ Report generation
-- ✅ Error handling
-- ✅ Edge cases
-
-**Recommendation:** The current test suite provides **strong confidence** in code quality. No additional tests are strictly necessary, though minor improvements could push coverage to 87-88% if desired.
+The current suite provides high confidence for the skill's intended use. It covers the core local analysis pipeline, report generation, CLI command surface, and recently added triage features while avoiding brittle tests for cosmetic terminal output or environment-breakage paths.
