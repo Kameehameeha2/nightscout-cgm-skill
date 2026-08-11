@@ -49,7 +49,9 @@ def _load_secrets() -> None:
                 "DISPLAY_UNITS", "APP_PASSWORD"):
         try:
             if key in st.secrets and st.secrets[key]:
-                os.environ[key] = str(st.secrets[key])
+                # strip(): a trailing newline/space pasted into the Secrets box
+                # is sent verbatim as the x-api-key header and 401s.
+                os.environ[key] = str(st.secrets[key]).strip()
         except Exception:
             pass  # no secrets file locally — rely on the real environment
 

@@ -129,6 +129,9 @@ def generate_report(analysis: dict, therapy_context: str | None = None,
             messages=[{"role": "user", "content": user_msg}],
         ) as stream:
             final = stream.get_final_message()
+    except anthropic.AuthenticationError:
+        return {"ok": False, "markdown": _bad_key_message(), "model": model,
+                "error": "Anthropic rejected the API key (401). See below."}
     except anthropic.APIError as e:  # network/status/rate-limit/etc.
         return {"ok": False, "markdown": "", "model": model,
                 "error": f"Claude API error: {e}"}
@@ -149,4 +152,23 @@ def _no_key_message() -> str:
         "settings suggestions can't be generated. The charts and statistics "
         "above are still fully computed.\n\n"
         "Add your Anthropic API key to the app's secrets to enable this section."
+    )
+
+
+def _bad_key_message() -> str:
+    return (
+        "### AI report unavailable — the API key was rejected\n\n"
+        "Anthropic returned **401 invalid x-api-key**. The charts and statistics "
+        "above are unaffected. Check, in this order:\n\n"
+        "1. The key is an **API key from <https://console.anthropic.com>** "
+        "(starts with `sk-ant-api03-`). A Claude.ai or Claude Code subscription "
+        "login is *not* an API key and will always 401 here.\n"
+        "2. It was pasted **whole** — these keys are long and are easy to "
+        "truncate mid-copy.\n"
+        "3. In the Secrets box it reads "
+        "`ANTHROPIC_API_KEY = \"sk-ant-api03-...\"` — one line, plain double "
+        "quotes, no extra quotes inside the value.\n"
+        "4. The key hasn't been **revoked**, and the workspace it belongs to "
+        "has credit.\n\n"
+        "Saving Secrets restarts the app; the report works on the next click."
     )
