@@ -1,0 +1,11 @@
+# Streamlit app configuration.
+[theme]
+base = "light"
+primaryColor = "#2E86DE"
+
+[server]
+# Reports can take a while (full-year fetch + Claude call); keep uploads modest.
+maxUploadSize = 20
+
+[browser]
+gatherUsageStats = false

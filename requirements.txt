@@ -1,4 +1,9 @@
+# Runtime (dashboard + analysis + AI report)
+streamlit>=1.40.0
+pandas>=2.0.0
+plotly>=5.20.0
 requests>=2.25.0
+anthropic>=0.69.0
 
 # Development/Testing dependencies
 pytest>=7.0.0

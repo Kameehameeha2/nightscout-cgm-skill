@@ -37,3 +37,10 @@ config.json
 nightscout_report.html
 nightscout_agp_report.html
 coverage.json
+
+# Generated analysis artifacts (health-derived data — keep OUT of git)
+full_analysis.json
+treatments_agg.json
+dinner_compare.json
+report_bundle.json
+GLUCOSE_REPORT.md
