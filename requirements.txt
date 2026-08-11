@@ -3,7 +3,7 @@ streamlit>=1.40.0
 pandas>=2.0.0
 plotly>=5.20.0
 requests>=2.25.0
-anthropic>=0.69.0
+anthropic>=0.121.0   # output_config={"effort": ...} support
 
 # Development/Testing dependencies
 pytest>=7.0.0

@@ -25,6 +25,12 @@ import os
 
 DEFAULT_MODEL = os.environ.get("REPORT_MODEL", "claude-opus-5")
 
+# claude-opus-5 thinks by default and max_tokens caps thinking + text together,
+# so 8k risked truncating the report mid-section. "medium" effort keeps the
+# analysis strong while cutting the pre-text thinking pause substantially.
+MAX_TOKENS = 16000
+EFFORT = os.environ.get("REPORT_EFFORT", "medium")
+
 # The user runs a fully automated loop; this context stops the model from
 # suggesting manual-bolus / standard-pump advice that doesn't apply.
 DEFAULT_THERAPY_CONTEXT = (
@@ -91,58 +97,95 @@ def _context_payload(analysis: dict, therapy_context: str) -> str:
     return json.dumps(payload, indent=1, default=str)
 
 
+class ReportStream:
+    """Iterable of report chunks, sized for Streamlit's `st.write_stream`.
+
+    Iterating yields Markdown as Claude writes it, so the reader watches the
+    report build rather than staring at a spinner for the whole generation.
+    The outcome fields (`ok`, `markdown`, `model`, `error`) are populated by the
+    time iteration finishes; the common failures (missing key/SDK, 401, refusal,
+    API error) set `error` and yield an explanation instead of raising.
+    """
+
+    def __init__(self, analysis: dict, therapy_context: str | None = None,
+                 model: str | None = None):
+        self.analysis = analysis
+        self.therapy_context = therapy_context or DEFAULT_THERAPY_CONTEXT
+        self.model = model or DEFAULT_MODEL
+        self.ok = False
+        self.markdown = ""
+        self.error = None
+
+    def _fail(self, error: str, markdown: str = "") -> str:
+        self.error = error
+        self.markdown = markdown
+        return markdown
+
+    def __iter__(self):
+        if not self.analysis or self.analysis.get("error"):
+            self._fail(self.analysis.get("error", "no analysis")
+                       if self.analysis else "no analysis")
+            return
+
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            yield self._fail("ANTHROPIC_API_KEY not set", _no_key_message())
+            return
+
+        try:
+            import anthropic
+        except ImportError:
+            self._fail("The `anthropic` package is not installed.")
+            return
+
+        user_msg = (
+            "Here is the computed analysis of my own CGM + pump history as JSON. "
+            "Write the report per your instructions, using these exact numbers.\n\n"
+            f"```json\n{_context_payload(self.analysis, self.therapy_context)}\n```"
+        )
+
+        parts: list[str] = []
+        try:
+            client = anthropic.Anthropic()
+            with client.messages.stream(
+                model=self.model,
+                max_tokens=MAX_TOKENS,
+                output_config={"effort": EFFORT},
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_msg}],
+            ) as stream:
+                for text in stream.text_stream:
+                    parts.append(text)
+                    yield text
+                final = stream.get_final_message()
+        except anthropic.AuthenticationError:
+            yield self._fail("Anthropic rejected the API key (401). See below.",
+                             _bad_key_message())
+            return
+        except anthropic.APIError as e:  # network/status/rate-limit/etc.
+            # Keep whatever streamed before the failure — a partial report still
+            # beats an empty pane.
+            self._fail(f"Claude API error: {e}", "".join(parts))
+            return
+
+        self.markdown = "".join(parts).strip()
+        if final.stop_reason == "refusal":
+            self._fail("The request was declined by the model's safety system.")
+            return
+        self.ok = bool(self.markdown)
+        if not self.ok:
+            self.error = "Empty response from the model."
+
+
 def generate_report(analysis: dict, therapy_context: str | None = None,
                     model: str | None = None) -> dict:
-    """Return {'ok': bool, 'markdown': str, 'model': str, 'error': str|None}.
+    """Blocking wrapper over ReportStream, for non-streaming callers (CLI, tests).
 
-    Never raises for the common failure modes (missing key/SDK, refusal, API
-    error) — the caller renders `markdown` either way.
+    Returns {'ok': bool, 'markdown': str, 'model': str, 'error': str|None}.
     """
-    if not analysis or analysis.get("error"):
-        return {"ok": False, "markdown": "", "model": None,
-                "error": analysis.get("error", "no analysis")}
-
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return {"ok": False, "markdown": _no_key_message(), "model": None,
-                "error": "ANTHROPIC_API_KEY not set"}
-
-    try:
-        import anthropic
-    except ImportError:
-        return {"ok": False, "markdown": "", "model": None,
-                "error": "The `anthropic` package is not installed."}
-
-    model = model or DEFAULT_MODEL
-    context = _context_payload(analysis, therapy_context or DEFAULT_THERAPY_CONTEXT)
-    user_msg = (
-        "Here is the computed analysis of my own CGM + pump history as JSON. "
-        "Write the report per your instructions, using these exact numbers.\n\n"
-        f"```json\n{context}\n```"
-    )
-
-    try:
-        client = anthropic.Anthropic()
-        with client.messages.stream(
-            model=model,
-            max_tokens=8000,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
-        ) as stream:
-            final = stream.get_final_message()
-    except anthropic.AuthenticationError:
-        return {"ok": False, "markdown": _bad_key_message(), "model": model,
-                "error": "Anthropic rejected the API key (401). See below."}
-    except anthropic.APIError as e:  # network/status/rate-limit/etc.
-        return {"ok": False, "markdown": "", "model": model,
-                "error": f"Claude API error: {e}"}
-
-    if final.stop_reason == "refusal":
-        return {"ok": False, "markdown": "", "model": model,
-                "error": "The request was declined by the model's safety system."}
-
-    markdown = "".join(b.text for b in final.content if b.type == "text").strip()
-    return {"ok": bool(markdown), "markdown": markdown, "model": model,
-            "error": None if markdown else "Empty response from the model."}
+    stream = ReportStream(analysis, therapy_context, model)
+    text = "".join(stream)
+    return {"ok": stream.ok, "markdown": stream.markdown or text,
+            "model": stream.model, "error": stream.error}
 
 
 def _no_key_message() -> str:
