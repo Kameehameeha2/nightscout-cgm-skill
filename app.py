@@ -46,7 +46,7 @@ st.set_page_config(page_title="Nightscout CGM Dashboard", page_icon="🩸", layo
 # --------------------------------------------------------------------------- #
 def _load_secrets() -> None:
     for key in ("NIGHTSCOUT_URL", "ANTHROPIC_API_KEY", "REPORT_MODEL",
-                "DISPLAY_UNITS", "APP_PASSWORD"):
+                "REPORT_EFFORT", "DISPLAY_UNITS", "APP_PASSWORD"):
         try:
             if key in st.secrets and st.secrets[key]:
                 # strip(): a trailing newline/space pasted into the Secrets box

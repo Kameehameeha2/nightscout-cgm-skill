@@ -26,10 +26,12 @@ import os
 DEFAULT_MODEL = os.environ.get("REPORT_MODEL", "claude-opus-5")
 
 # claude-opus-5 thinks by default and max_tokens caps thinking + text together,
-# so 8k risked truncating the report mid-section. "medium" effort keeps the
-# analysis strong while cutting the pre-text thinking pause substantially.
+# so 8k risked truncating the report mid-section.
 MAX_TOKENS = 16000
-EFFORT = os.environ.get("REPORT_EFFORT", "medium")
+# "high" is the model default and what produced the reports worth keeping —
+# the report's depth is the whole point, so don't trade it for latency.
+# Set REPORT_EFFORT=medium (or low) to trade depth for speed.
+EFFORT = os.environ.get("REPORT_EFFORT", "high")
 
 # The user runs a fully automated loop; this context stops the model from
 # suggesting manual-bolus / standard-pump advice that doesn't apply.
