@@ -289,14 +289,20 @@ def _conv(v):
     return round(v, 1) if use_mmol else round(v * MMOL_FACTOR, 0)
 
 
+def _hour_series(hours: dict) -> tuple[list[int], list[dict]]:
+    """Hour keys are ints in-process, but strings after a JSON round-trip, and
+    hours with no readings are absent entirely — index by the real keys."""
+    keys = sorted(hours, key=int)
+    return [int(k) for k in keys], [hours[k] for k in keys]
+
+
 def render_agp(hours: dict) -> None:
-    hs = sorted(int(h) for h in hours)
-    x = hs
-    med = [_conv(hours[str(h)]["p50"]) for h in hs]
-    p25 = [_conv(hours[str(h)]["p25"]) for h in hs]
-    p75 = [_conv(hours[str(h)]["p75"]) for h in hs]
-    p05 = [_conv(hours[str(h)]["p05"]) for h in hs]
-    p95 = [_conv(hours[str(h)]["p95"]) for h in hs]
+    x, cells = _hour_series(hours)
+    med = [_conv(c["p50"]) for c in cells]
+    p25 = [_conv(c["p25"]) for c in cells]
+    p75 = [_conv(c["p75"]) for c in cells]
+    p05 = [_conv(c["p05"]) for c in cells]
+    p95 = [_conv(c["p95"]) for c in cells]
     f = go.Figure()
     f.add_hrect(y0=low_disp, y1=high_disp, fillcolor="rgba(46,204,113,0.10)", line_width=0)
     f.add_trace(go.Scatter(x=x + x[::-1], y=p95 + p05[::-1], fill="toself",
@@ -312,9 +318,9 @@ def render_agp(hours: dict) -> None:
 
 
 def render_hourly_oor(hours: dict) -> None:
-    hs = sorted(int(h) for h in hours)
-    high = [hours[str(h)]["high"] for h in hs]
-    low = [-hours[str(h)]["low"] for h in hs]  # below the axis
+    hs, cells = _hour_series(hours)
+    high = [c["high"] for c in cells]
+    low = [-c["low"] for c in cells]  # below the axis
     f = go.Figure()
     f.add_trace(go.Bar(x=hs, y=high, name="High >target", marker_color="#E9A100"))
     f.add_trace(go.Bar(x=hs, y=low, name="Low <target", marker_color="#D03B3B"))
