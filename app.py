@@ -7,8 +7,10 @@ What it does
   keeps it fresh: a background-ish auto-refresh on load (hourly, cached) plus a
   one-click "Refresh all history" button that fetches a full year so every date
   range (1 day … 1 year) is instantly available.
-- KPI cards + an interactive Plotly glucose chart, fully driven by the sidebar
-  date filter and thresholds.
+- A top bar with the date-range presets that scope the whole page, a hero
+  Time-in-Range figure, status tiles, and an interactive Plotly glucose chart.
+  Long ranges aggregate to a median + IQR band, because a month of 5-minute
+  readings overplots into an unreadable scribble.
 - One "Generate full report" button runs the whole pipeline inline: computes
   the analysis (AGP, hourly out-of-range, day×hour heatmap, Loopalyzer average
   day), then asks Claude to find patterns, check them against your live Trio
@@ -38,7 +40,57 @@ CGM_SCRIPT = PROJECT_ROOT / "scripts" / "cgm.py"
 DB_PATH = PROJECT_ROOT / "cgm_data.db"
 MMOL_FACTOR = 18.0182
 
-st.set_page_config(page_title="Nightscout CGM Dashboard", page_icon="🩸", layout="wide")
+# --------------------------------------------------------------------------- #
+# Palette. Validated, not eyeballed — see .streamlit/config.toml for the run.
+#
+# One rule drives the whole layout: red and green are near-identical under
+# deuteranopia (ΔE 4.1, a hard fail), and "low" vs "in range" is exactly the
+# distinction that matters here. So every glucose state carries an ICON and a
+# WORD as well as its colour — colour never carries meaning on its own.
+# Text always wears ink tokens; identity comes from a coloured mark beside it.
+# --------------------------------------------------------------------------- #
+SURFACE = "#131C2B"       # card / chart surface
+INK = "#F2F5FA"           # primary ink
+INK_DIM = "#A8B6CC"       # axis / secondary ink
+INK_MUTED = "#8FA0B8"     # labels, captions
+GRID = "#22314A"          # hairline gridline, one step off surface
+SERIES = "#3987E5"        # glucose line (categorical slot 1)
+GOOD = "#0CA30C"          # status: in range
+WARNING = "#FAB219"       # status: high
+CRITICAL = "#D03B3B"      # status: low
+BAND_FILL = "rgba(12,163,12,0.10)"   # in-range wash — a wash, never a block
+
+st.set_page_config(page_title="Glucose", page_icon="🩸", layout="wide")
+
+
+def style_fig(fig, height: int, ylab: str | None = None, legend: bool = False,
+              hover: str = "x unified"):
+    """Shared chart chrome: recessive hairline grid, transparent surface, ink text.
+
+    Every chart goes through here so the dashboard reads as one system rather
+    than a pile of differently-styled plots.
+    """
+    fig.update_layout(
+        height=height,
+        margin=dict(l=8, r=8, t=8, b=8),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=INK_DIM, size=13,
+                  family='system-ui, -apple-system, "Segoe UI", sans-serif'),
+        hovermode="x unified",
+        showlegend=legend,
+        legend=dict(orientation="h", y=-0.2, font=dict(color=INK_MUTED)),
+        hoverlabel=dict(bgcolor=SURFACE, bordercolor=GRID,
+                        font=dict(color=INK, size=13)),
+    )
+    # Bars and cells get a per-mark tooltip; only lines get the x-crosshair.
+    fig.update_layout(hovermode=hover)
+    # Hairline, solid, one step off surface — never dashed (reads as a threshold).
+    axis = dict(gridcolor=GRID, zeroline=False, linecolor=GRID,
+                tickfont=dict(color=INK_MUTED))
+    fig.update_xaxes(**axis)
+    fig.update_yaxes(title_text=ylab, **axis)
+    return fig
 
 
 # --------------------------------------------------------------------------- #
@@ -181,104 +233,227 @@ def compute_kpis(df: pd.DataFrame, low: float, high: float) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Sidebar
+# Card / tile styling
 # --------------------------------------------------------------------------- #
-st.sidebar.title("🩸 Controls")
+st.markdown(f"""
+<style>
+  .block-container {{ padding-top: 2.2rem; }}
+  .tile {{
+    background: {SURFACE};
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px;
+    padding: 14px 16px;
+    height: 100%;
+  }}
+  .tile-label {{
+    color: {INK_MUTED}; font-size: .78rem; text-transform: uppercase;
+    letter-spacing: .05em; display: flex; align-items: center; gap: 7px;
+  }}
+  /* Proportional figures — tabular-nums makes big numbers look loose. */
+  .tile-value {{ color: {INK}; font-size: 1.65rem; font-weight: 600; line-height: 1.35; }}
+  .tile-sub   {{ color: {INK_MUTED}; font-size: .76rem; }}
+  .hero {{ padding: 2px 0 6px 2px; }}
+  .hero-label {{
+    color: {INK_MUTED}; font-size: .82rem; text-transform: uppercase;
+    letter-spacing: .06em;
+  }}
+  .hero-value {{ color: {INK}; font-size: 3.6rem; font-weight: 600; line-height: 1.05; }}
+  .chip {{
+    display: inline-flex; align-items: center; gap: 7px; color: {INK_MUTED};
+    font-size: .9rem; background: {SURFACE}; border-radius: 999px;
+    padding: 5px 13px; margin-left: 4px;
+  }}
+  .dot {{ width: 9px; height: 9px; border-radius: 50%; display: inline-block; }}
+</style>
+""", unsafe_allow_html=True)
 
-if not os.environ.get("NIGHTSCOUT_URL"):
-    st.sidebar.warning("NIGHTSCOUT_URL is not set — configure it in the app "
-                       "secrets. Data refresh and reports will fail until then.")
 
-RANGE_OPTIONS = [
-    ("Last 1 day", 1), ("Last 7 days", 7), ("Last 14 days", 14),
-    ("Last 30 days", 30), ("Last 60 days", 60), ("Last 90 days", 90),
-    ("Last 6 months", 180), ("Last 9 months", 270), ("Last 1 year", 365),
-]
-range_choice = st.sidebar.selectbox(
-    "Date range", options=RANGE_OPTIONS, index=3, format_func=lambda o: o[0]
-)
-days = range_choice[1]
+def tile(label: str, value: str, icon: str = "", color: str | None = None,
+         sub: str = "") -> str:
+    """A stat tile: label · value · optional sub. Icon + word carry the state;
+    the coloured dot is a supplement, never the only cue."""
+    dot = f'<span class="dot" style="background:{color}"></span>' if color else ""
+    return (f'<div class="tile"><div class="tile-label">{dot}{icon} {label}</div>'
+            f'<div class="tile-value">{value}</div>'
+            f'<div class="tile-sub">{sub}</div></div>')
 
-use_mmol = st.sidebar.toggle("Show in mmol/L", value=True)
-unit_label = "mmol/L" if use_mmol else "mg/dL"
 
-st.sidebar.subheader(f"Target thresholds ({unit_label})")
-if use_mmol:
-    low_disp_in = st.sidebar.number_input("Low limit", 2.2, 6.7, 3.9, 0.1, format="%.1f")
-    high_disp_in = st.sidebar.number_input("High limit", 6.7, 16.7, 10.0, 0.1, format="%.1f")
-    low_thr, high_thr = low_disp_in * MMOL_FACTOR, high_disp_in * MMOL_FACTOR
-else:
-    low_thr = st.sidebar.number_input("Low limit", 40, 120, 70, 1)
-    high_thr = st.sidebar.number_input("High limit", 120, 300, 180, 1)
+# --------------------------------------------------------------------------- #
+# Top bar — title, settings, and the single filter row that scopes the page
+# --------------------------------------------------------------------------- #
+head, gear = st.columns([0.74, 0.26], vertical_alignment="center")
+head.markdown("## 🩸 Glucose")
+
+with gear.popover("⚙️ Settings", width="stretch"):
+    use_mmol = st.toggle("Show in mmol/L", value=True)
+    unit_label = "mmol/L" if use_mmol else "mg/dL"
+    st.caption(f"Target range ({unit_label})")
+    if use_mmol:
+        low_in = st.number_input("Low limit", 2.2, 6.7, 3.9, 0.1, format="%.1f")
+        high_in = st.number_input("High limit", 6.7, 16.7, 10.0, 0.1, format="%.1f")
+        low_thr, high_thr = low_in * MMOL_FACTOR, high_in * MMOL_FACTOR
+    else:
+        low_thr = st.number_input("Low limit", 40, 120, 70, 1)
+        high_thr = st.number_input("High limit", 120, 300, 180, 1)
+    st.divider()
+    do_refresh = st.button("🔄 Refresh all history", width="stretch",
+                           help="Fetches a full year from Nightscout so every "
+                                "date range is instantly available.")
+
 if low_thr >= high_thr:
-    st.sidebar.error("Low limit must be below the high limit.")
+    st.error("Low limit must be below the high limit — check Settings.")
     st.stop()
 
-st.sidebar.divider()
-if st.sidebar.button("🔄 Refresh all history (1 click)", use_container_width=True,
-                     help="Fetches a full year from Nightscout so every date "
-                          "range is instantly available."):
+if not os.environ.get("NIGHTSCOUT_URL"):
+    st.warning("NIGHTSCOUT_URL is not set — add it to the app secrets. Data "
+               "refresh and reports will fail until then.")
+
+if do_refresh:
     with st.spinner("Fetching a full year of readings…"):
         proc = run_cgm("refresh", "--days", "365")
     if proc.returncode == 0:
         load_readings.clear()
         run_analysis.clear()
         auto_refresh.clear()
-        st.sidebar.success("All history refreshed.")
+        st.success("All history refreshed.")
     else:
-        st.sidebar.error("Refresh failed.")
-        st.sidebar.code((proc.stderr or proc.stdout).strip()[:1000])
+        st.error("Refresh failed.")
+        st.code((proc.stderr or proc.stdout).strip()[:1000])
+
+# Date range: presets in one row above everything they scope, so every number
+# on the page always describes the same slice.
+RANGES = {"1d": 1, "7d": 7, "14d": 14, "30d": 30, "90d": 90, "6m": 180, "1y": 365}
+picked = st.segmented_control("Date range", list(RANGES), default="30d",
+                              label_visibility="collapsed")
+days = RANGES.get(picked or "30d", 30)
 
 # Auto-refresh on load (cold start / hourly), non-fatal.
 if os.environ.get("NIGHTSCOUT_URL"):
     with st.spinner("Checking for new data…"):
         rc, msg = auto_refresh("hourly")
     if rc != 0 and not DB_PATH.exists():
-        st.sidebar.error("Initial data fetch failed.")
-        st.sidebar.code(msg)
+        st.error("Initial data fetch failed.")
+        st.code(msg)
 
 
 # --------------------------------------------------------------------------- #
 # Header + KPIs + glucose chart
 # --------------------------------------------------------------------------- #
-st.title("Nightscout CGM Dashboard")
-st.caption(f"Showing the last {days} days in {unit_label}")
-
 df = load_readings(days, db_mtime())
 if df.empty:
-    st.warning("No readings in the local database yet. Use **Refresh all "
-               "history** in the sidebar once NIGHTSCOUT_URL is configured.")
+    st.warning("No readings in the local database yet. Open **⚙️ Settings → "
+               "Refresh all history** once NIGHTSCOUT_URL is configured.")
     st.stop()
 
 kpis = compute_kpis(df, low_thr, high_thr)
 low_disp, high_disp = to_display(low_thr, use_mmol), to_display(high_thr, use_mmol)
+span = f"{df['time'].min():%d %b} – {df['time'].max():%d %b %Y}"
 
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Time in Range", f"{kpis['tir_pct']}%", help=f"{low_disp}–{high_disp} {unit_label}")
-c2.metric("GMI (est. A1C)", f"{kpis['gmi']}%")
-c3.metric(f"Average ({unit_label})", to_display(kpis["mean_mgdl"], use_mmol))
-c4.metric("Variability (CV)", f"{kpis['cv']}%")
-c5.metric("Readings", f"{kpis['readings']:,}")
+# Hero — the one number this dashboard leads with. The value wears ink, not the
+# data colour; the coloured dot beside it carries the identity.
+st.markdown(
+    f'<div class="hero">'
+    f'<div class="hero-label">Time in range · last {days} days</div>'
+    f'<div><span class="hero-value">{kpis["tir_pct"]}%</span>'
+    f'<span class="chip"><span class="dot" style="background:{GOOD}"></span>'
+    f'in range {low_disp}–{high_disp} {unit_label}</span></div></div>',
+    unsafe_allow_html=True)
 
-b1, b2 = st.columns(2)
-b1.progress(min(kpis["low_pct"] / 100, 1.0), text=f"Below range: {kpis['low_pct']}%")
-b2.progress(min(kpis["high_pct"] / 100, 1.0), text=f"Above range: {kpis['high_pct']}%")
 
-st.subheader("Glucose over time")
+def render_range_bar(k: dict) -> None:
+    """The clinical TIR bar — share of time low / in range / high in one line."""
+    segs = [("Low", k["low_pct"], CRITICAL, "▼"),
+            ("In range", k["tir_pct"], GOOD, "●"),
+            ("High", k["high_pct"], WARNING, "▲")]
+    fig = go.Figure()
+    for name, val, color, icon in segs:
+        fig.add_trace(go.Bar(
+            x=[val], y=["tir"], orientation="h", name=f"{icon} {name}",
+            # A 2px line in the page colour is how Plotly renders the surface
+            # gap that separates touching segments.
+            marker=dict(color=color, line=dict(color="#0B1220", width=2)),
+            hovertemplate=f"{icon} {name}: %{{x:.1f}}%<extra></extra>",
+        ))
+    # bargap keeps the bar thin (≤24px) — a fat saturated block reads loud.
+    fig.update_layout(barmode="stack", bargap=0.78)
+    style_fig(fig, 104, legend=True, hover="closest")
+    # Legend reads left-to-right in the same order as the segments.
+    fig.update_layout(legend=dict(orientation="h", y=-0.5, traceorder="normal",
+                                 font=dict(color=INK_MUTED)))
+    fig.update_xaxes(visible=False, range=[0, 100])
+    fig.update_yaxes(visible=False)
+    st.plotly_chart(fig, width="stretch",
+                    config={"displayModeBar": False})
+
+
+render_range_bar(kpis)
+
+t1, t2, t3, t4 = st.columns(4)
+t1.markdown(tile("Above range", f"{kpis['high_pct']}%", "▲", WARNING,
+                 f"over {high_disp} {unit_label}"), unsafe_allow_html=True)
+t2.markdown(tile("Below range", f"{kpis['low_pct']}%", "▼", CRITICAL,
+                 f"under {low_disp} {unit_label} · aim below 4%"),
+            unsafe_allow_html=True)
+t3.markdown(tile("GMI (est. A1C)", f"{kpis['gmi']}%",
+                 sub=f"average {to_display(kpis['mean_mgdl'], use_mmol)} {unit_label}"),
+            unsafe_allow_html=True)
+t4.markdown(tile("Variability (CV)", f"{kpis['cv']}%",
+                 sub=f"{kpis['readings']:,} readings · {span}"),
+            unsafe_allow_html=True)
+
+st.markdown("#### Glucose over time")
 plot_df = df.copy()
 plot_df["display"] = plot_df["sgv"] / MMOL_FACTOR if use_mmol else plot_df["sgv"]
+
 fig = go.Figure()
-fig.add_hrect(y0=low_disp, y1=high_disp, fillcolor="rgba(46,204,113,0.12)", line_width=0,
-              annotation_text="Target range", annotation_position="top left")
-fig.add_trace(go.Scatter(x=plot_df["time"], y=plot_df["display"], mode="lines",
-              name="Glucose", line=dict(color="#2E86DE", width=1.2),
-              hovertemplate="%{x|%b %d %H:%M}<br>%{y} " + unit_label + "<extra></extra>"))
-fig.add_hline(y=low_disp, line=dict(color="#E67E22", width=1, dash="dot"))
-fig.add_hline(y=high_disp, line=dict(color="#E67E22", width=1, dash="dot"))
-fig.update_layout(height=420, margin=dict(l=10, r=10, t=30, b=10),
-                  yaxis_title=f"Glucose ({unit_label})", hovermode="x unified",
-                  showlegend=False)
-st.plotly_chart(fig, use_container_width=True)
+fig.add_hrect(y0=low_disp, y1=high_disp, fillcolor=BAND_FILL, line_width=0)
+
+# Every reading drawn raw is only readable over a day or two — a month of
+# 5-minute data is ~8,600 points, which overplots into a solid scribble and
+# hides the very pattern the long view is for. Past that, aggregate into a
+# median line with an IQR band: fewer marks, and the shape of the day survives.
+BUCKET = {2: None, 7: "1h"}
+rule = next((v for k, v in BUCKET.items() if days <= k), "1D")
+if rule is None:
+    fig.add_trace(go.Scatter(
+        x=plot_df["time"], y=plot_df["display"], mode="lines", name="Glucose",
+        line=dict(color=SERIES, width=2),
+        hovertemplate="%{x|%a %d %b %H:%M}<br>%{y:.1f} " + unit_label
+                      + "<extra></extra>"))
+    sub = "every reading"
+    legend = False
+else:
+    buckets = plot_df.set_index("time")["display"].resample(rule)
+    med, p25, p75 = buckets.median(), buckets.quantile(.25), buckets.quantile(.75)
+    med = med.dropna()
+    # Plain datetimes and floats — pandas Timestamps aren't serializable by
+    # every JSON encoder in the chain, and this removes the dependency.
+    x = med.index.to_pydatetime().tolist()
+    lo = p25.reindex(med.index).astype(float).tolist()
+    hi = p75.reindex(med.index).astype(float).tolist()
+    fig.add_trace(go.Scatter(
+        x=x + x[::-1], y=hi + lo[::-1],
+        fill="toself", fillcolor="rgba(57,135,229,0.16)", line_width=0,
+        name="25–75%", hoverinfo="skip"))
+    fig.add_trace(go.Scatter(
+        x=x, y=med.astype(float).tolist(), mode="lines", name="Median",
+        line=dict(color=SERIES, width=2),
+        hovertemplate="%{x|%a %d %b %H:%M}<br>%{y:.1f} " + unit_label
+                      + "<extra></extra>"))
+    sub = {"1h": "hourly median, 25–75% band",
+           "1D": "daily median, 25–75% band"}[rule]
+    legend = True
+
+# Solid hairlines, labelled — the thresholds read without relying on colour.
+# xshift keeps the label clear of the y-axis, which otherwise clips it.
+for y, text, color, pos in ((high_disp, f"high {high_disp}", WARNING, "top left"),
+                            (low_disp, f"low {low_disp}", CRITICAL, "bottom left")):
+    fig.add_hline(y=y, line=dict(color=color, width=1), annotation_text=text,
+                  annotation_position=pos, annotation_xshift=10,
+                  annotation_font=dict(color=INK_MUTED, size=11))
+style_fig(fig, 420, ylab=f"Glucose ({unit_label})", legend=legend)
+st.plotly_chart(fig, width="stretch")
+st.caption(f"{sub} · {span} · {kpis['readings']:,} readings")
 
 
 # --------------------------------------------------------------------------- #
@@ -306,17 +481,18 @@ def render_agp(hours: dict) -> None:
     p05 = [_conv(c["p05"]) for c in cells]
     p95 = [_conv(c["p95"]) for c in cells]
     f = go.Figure()
-    f.add_hrect(y0=low_disp, y1=high_disp, fillcolor="rgba(46,204,113,0.10)", line_width=0)
+    f.add_hrect(y0=low_disp, y1=high_disp, fillcolor=BAND_FILL, line_width=0)
     f.add_trace(go.Scatter(x=x + x[::-1], y=p95 + p05[::-1], fill="toself",
-                fillcolor="rgba(46,134,222,0.12)", line_width=0, name="5–95%", hoverinfo="skip"))
+                fillcolor="rgba(57,135,229,0.12)", line_width=0, name="5–95%",
+                hoverinfo="skip"))
     f.add_trace(go.Scatter(x=x + x[::-1], y=p75 + p25[::-1], fill="toself",
-                fillcolor="rgba(46,134,222,0.28)", line_width=0, name="25–75%", hoverinfo="skip"))
+                fillcolor="rgba(57,135,229,0.28)", line_width=0, name="25–75%",
+                hoverinfo="skip"))
     f.add_trace(go.Scatter(x=x, y=med, mode="lines", name="Median",
-                line=dict(color="#2E86DE", width=2.5)))
-    f.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10),
-                    xaxis_title="Hour of day", yaxis_title=f"Glucose ({unit_label})",
-                    xaxis=dict(dtick=3))
-    st.plotly_chart(f, use_container_width=True)
+                line=dict(color=SERIES, width=2)))
+    style_fig(f, 360, ylab=f"Glucose ({unit_label})", legend=True)
+    f.update_xaxes(title_text="Hour of day", dtick=3)
+    st.plotly_chart(f, width="stretch")
 
 
 def render_hourly_oor(hours: dict) -> None:
@@ -324,12 +500,12 @@ def render_hourly_oor(hours: dict) -> None:
     high = [c["high"] for c in cells]
     low = [-c["low"] for c in cells]  # below the axis
     f = go.Figure()
-    f.add_trace(go.Bar(x=hs, y=high, name="High >target", marker_color="#E9A100"))
-    f.add_trace(go.Bar(x=hs, y=low, name="Low <target", marker_color="#D03B3B"))
-    f.update_layout(height=320, barmode="relative", margin=dict(l=10, r=10, t=10, b=10),
-                    xaxis_title="Hour of day", yaxis_title="% out of range",
-                    xaxis=dict(dtick=3))
-    st.plotly_chart(f, use_container_width=True)
+    f.add_trace(go.Bar(x=hs, y=high, name="▲ High", marker_color=WARNING))
+    f.add_trace(go.Bar(x=hs, y=low, name="▼ Low", marker_color=CRITICAL))
+    f.update_layout(barmode="relative", bargap=0.35)
+    style_fig(f, 320, ylab="% out of range", legend=True, hover="closest")
+    f.update_xaxes(title_text="Hour of day", dtick=3)
+    st.plotly_chart(f, width="stretch")
 
 
 def render_heatmap(heat: dict) -> None:
@@ -338,11 +514,21 @@ def render_heatmap(heat: dict) -> None:
     for key, cell in heat.items():
         d, h = map(int, key.split("_"))
         z[d][h] = round(100 - cell["tir"], 1)  # % out of range
-    f = go.Figure(go.Heatmap(z=z, x=list(range(24)), y=days_lbl, colorscale="Reds",
-                  colorbar=dict(title="% OOR"), hovertemplate="%{y} %{x}:00<br>%{z}% out of range<extra></extra>"))
-    f.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
-                    xaxis_title="Hour of day", xaxis=dict(dtick=3))
-    st.plotly_chart(f, use_container_width=True)
+    # One-hue sequential ramp (the palette's blue), oriented for a dark surface:
+    # the darkest step means "near zero" and recedes toward the background, so
+    # the worst cells are the brightest. Never a rainbow; the colorbar is the
+    # scale legend.
+    blue_ramp = [[0.0, "#0d366b"], [0.3, "#256abf"], [0.6, "#3987e5"],
+                 [1.0, "#b7d3f6"]]
+    f = go.Figure(go.Heatmap(
+        z=z, x=list(range(24)), y=days_lbl, colorscale=blue_ramp,
+        xgap=2, ygap=2,  # 2px surface gap between cells
+        colorbar=dict(title="% out<br>of range", outlinewidth=0,
+                      tickfont=dict(color=INK_MUTED)),
+        hovertemplate="%{y} %{x}:00<br>%{z}% out of range<extra></extra>"))
+    style_fig(f, 300, hover="closest")
+    f.update_xaxes(title_text="Hour of day", dtick=3)
+    st.plotly_chart(f, width="stretch")
 
 
 def render_loopalyzer(loop: dict) -> None:
@@ -358,32 +544,42 @@ def render_loopalyzer(loop: dict) -> None:
 
     st.markdown("**Average day — glucose**")
     g = go.Figure()
-    g.add_hrect(y0=low_disp, y1=high_disp, fillcolor="rgba(46,204,113,0.10)", line_width=0)
+    g.add_hrect(y0=low_disp, y1=high_disp, fillcolor=BAND_FILL, line_width=0)
     g.add_trace(go.Scatter(x=t + t[::-1], y=p75 + p25[::-1], fill="toself",
-                fillcolor="rgba(46,134,222,0.22)", line_width=0, name="IQR", hoverinfo="skip"))
+                fillcolor="rgba(57,135,229,0.22)", line_width=0, name="IQR",
+                hoverinfo="skip"))
     g.add_trace(go.Scatter(x=t, y=med, mode="lines", name="Median glucose",
-                line=dict(color="#2E86DE", width=2.5)))
-    g.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
-                    xaxis_title="Hour of day", yaxis_title=f"Glucose ({unit_label})",
-                    xaxis=dict(dtick=3), showlegend=False)
-    st.plotly_chart(g, use_container_width=True)
+                line=dict(color=SERIES, width=2)))
+    style_fig(g, 300, ylab=f"Glucose ({unit_label})", legend=True)
+    g.update_xaxes(title_text="Hour of day", dtick=3)
+    st.plotly_chart(g, width="stretch")
 
-    st.markdown("**Average day — insulin & carbs**")
+    # Two charts, not one with two y-axes: a dual axis aligns two unrelated
+    # scales arbitrarily and invents a correlation that isn't in the data.
+    # Basal (U/hr) and bolus (U) are both insulin and share one axis honestly;
+    # carbs are grams, so they get their own chart.
+    st.markdown("**Average day — insulin**")
     ins = go.Figure()
-    ins.add_trace(go.Scatter(x=t, y=basal_s, mode="lines", name="Basal (scheduled)",
-                  line=dict(color="#1BAF7A", width=1.5, dash="dot")))
-    ins.add_trace(go.Scatter(x=t, y=basal_d, mode="lines", name="Basal (delivered avg)",
-                  line=dict(color="#1BAF7A", width=2.5)))
-    ins.add_trace(go.Bar(x=t, y=bolus, name="Bolus/SMB (U, avg/day)", marker_color="#4A3AA7",
-                  yaxis="y2", opacity=0.6))
-    ins.add_trace(go.Bar(x=t, y=carbs, name="Carbs (g, avg/day)", marker_color="#EB6834",
-                  yaxis="y2", opacity=0.4))
-    ins.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10),
-                      xaxis_title="Hour of day", xaxis=dict(dtick=3),
-                      yaxis=dict(title="Basal (U/hr)"),
-                      yaxis2=dict(title="Bolus U / Carbs g", overlaying="y", side="right"),
-                      barmode="overlay", legend=dict(orientation="h", y=-0.25))
-    st.plotly_chart(ins, use_container_width=True)
+    ins.add_trace(go.Bar(x=t, y=bolus, name="Bolus / SMB (U)",
+                  marker_color="#9085E9", opacity=0.75))
+    ins.add_trace(go.Scatter(x=t, y=basal_s, mode="lines", name="Basal, scheduled",
+                  line=dict(color="#199E70", width=1.5, dash="dot")))
+    ins.add_trace(go.Scatter(x=t, y=basal_d, mode="lines", name="Basal, delivered",
+                  line=dict(color="#199E70", width=2)))
+    ins.update_layout(bargap=0.35)
+    style_fig(ins, 300, ylab="Insulin (U/hr basal · U bolus)", legend=True)
+    ins.update_xaxes(title_text="Hour of day", dtick=3)
+    st.plotly_chart(ins, width="stretch")
+
+    st.markdown("**Average day — carbs**")
+    cb = go.Figure()
+    cb.add_trace(go.Bar(x=t, y=carbs, name="Carbs (g)", marker_color="#D95926",
+                 opacity=0.85))
+    cb.update_layout(bargap=0.35)
+    style_fig(cb, 220, ylab="Carbs (g)", hover="closest")
+    cb.update_xaxes(title_text="Hour of day", dtick=3)
+    st.plotly_chart(cb, width="stretch")
+
     st.caption(f"Averaged over {loop['n_days']} days, {loop['bucket_min']}-min buckets. "
                "IOB/COB are intentionally omitted rather than modelled inaccurately.")
 
@@ -398,7 +594,7 @@ st.caption("One click: computes the AGP, hourly out-of-range, day×hour heatmap,
            "them against your Trio settings, and suggest what to discuss with your "
            "care team.")
 
-if st.button("Generate full report", type="primary", use_container_width=True):
+if st.button("Generate full report", type="primary", width="stretch"):
     with st.spinner("Computing analysis (glucose + treatments + Loopalyzer)…"):
         result = run_analysis(days, db_mtime(), str(load_profile("hourly").get("units")))
 

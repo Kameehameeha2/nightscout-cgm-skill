@@ -1,5 +1,5 @@
 # Runtime (dashboard + analysis + AI report)
-streamlit>=1.40.0
+streamlit>=1.49.0   # width="stretch" (use_container_width is deprecated)
 pandas>=2.0.0
 plotly>=5.20.0
 requests>=2.25.0

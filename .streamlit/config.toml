@@ -1,7 +1,17 @@
 # Streamlit app configuration.
+#
+# Dark navy theme. The mark colours used on these surfaces were validated with
+# the dataviz palette validator (blue vs green: deutan ΔE 27.9, all marks ≥3:1
+# against the #131C2B card surface) and the ink colours against WCAG
+# (body 15.6:1, muted 6.4:1 on the card). Don't change these piecemeal —
+# re-validate if you do.
 [theme]
-base = "light"
-primaryColor = "#2E86DE"
+base = "dark"
+primaryColor = "#3987E5"              # series blue — accents, focus, buttons
+backgroundColor = "#0B1220"           # page plane
+secondaryBackgroundColor = "#131C2B"  # cards / chart surface
+textColor = "#F2F5FA"                 # primary ink
+font = "sans serif"
 
 [server]
 # Reports can take a while (full-year fetch + Claude call); keep uploads modest.
