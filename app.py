@@ -317,15 +317,19 @@ st.markdown(f"""
   div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_control"] {{
     color: {INK_DIM};
   }}
+  /* !important is load-bearing here: Streamlit's own emotion classes are more
+     specific than these attribute selectors and otherwise win the cascade.
+     The descendant rule catches the label whether it renders as p, span or div. */
   div[data-testid="stButtonGroup"] button[kind="segmented_controlActive"],
   div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] {{
-    background: {ACCENT};
-    border-color: {ACCENT};
-    color: #FFFFFF;
+    background: {ACCENT} !important;
+    border-color: {ACCENT} !important;
+    color: #FFFFFF !important;
   }}
-  div[data-testid="stButtonGroup"] button[kind="segmented_controlActive"] p,
-  div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] p {{
-    color: #FFFFFF;
+  div[data-testid="stButtonGroup"] button[kind="segmented_controlActive"] *,
+  div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] * {{
+    color: #FFFFFF !important;
+    fill: #FFFFFF !important;
   }}
 </style>
 """, unsafe_allow_html=True)
