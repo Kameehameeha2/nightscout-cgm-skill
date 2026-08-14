@@ -59,6 +59,9 @@ GOOD = "#0CA30C"          # status: in range
 WARNING = "#FAB219"       # status: high
 CRITICAL = "#D03B3B"      # status: low
 BAND_FILL = "rgba(12,163,12,0.10)"   # in-range wash — a wash, never a block
+# Chrome accent: a deeper step of the series-blue ramp, so UI never wears a data
+# colour. Keep in sync with primaryColor in .streamlit/config.toml.
+ACCENT = "#256ABF"
 
 st.set_page_config(page_title="Glucose", page_icon="🩸", layout="wide")
 
@@ -299,6 +302,31 @@ st.markdown(f"""
     padding: 5px 13px; margin-left: 4px;
   }}
   .dot {{ width: 9px; height: 9px; border-radius: 50%; display: inline-block; }}
+
+  /* Range buttons. Streamlit marks the selected option by recolouring its
+     LABEL to the accent, which reads as low-contrast blue-on-navy. Fill the
+     button instead and keep the label white (5.39:1 on this accent) — a filled
+     chip is also a much clearer "you are here" than tinted text. Both attribute
+     spellings are matched because the testid form varies across versions. */
+  div[data-testid="stButtonGroup"] button {{
+    font-size: 1rem;
+    font-weight: 600;
+    padding: 0.5rem 1.15rem;
+  }}
+  div[data-testid="stButtonGroup"] button[kind="segmented_control"],
+  div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_control"] {{
+    color: {INK_DIM};
+  }}
+  div[data-testid="stButtonGroup"] button[kind="segmented_controlActive"],
+  div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] {{
+    background: {ACCENT};
+    border-color: {ACCENT};
+    color: #FFFFFF;
+  }}
+  div[data-testid="stButtonGroup"] button[kind="segmented_controlActive"] p,
+  div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] p {{
+    color: #FFFFFF;
+  }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -368,12 +396,11 @@ if do_backfill:
 # query against history we already hold — no network, so it's instant.
 RANGES = {"1d": 1, "7d": 7, "14d": 14, "30d": 30, "90d": 90, "6m": 180, "1y": 365}
 row_l, row_r = st.columns([0.85, 0.15], vertical_alignment="center")
-# width="stretch": the buttons grow with the window instead of sitting small in
-# the corner on a wide screen. This is what the control already does on mobile —
-# it fills the width, which is why it reads well there. Left-aligned, not
-# centred, so its edge lines up with the hero, tiles and chart axis below.
+# Natural width, left-aligned — the size comes from the CSS padding above rather
+# than from stretching across the page. Add width="stretch" here to go full-width
+# again if that reads better on a big monitor.
 picked = row_l.segmented_control("Date range", list(RANGES), default="30d",
-                                 label_visibility="collapsed", width="stretch")
+                                 label_visibility="collapsed")
 days = RANGES.get(picked or "30d", 30)
 sync_now = row_r.button("⟳ Now", width="stretch",
                         help="Check Nightscout for new readings right now.")
