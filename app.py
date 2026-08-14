@@ -368,8 +368,12 @@ if do_backfill:
 # query against history we already hold — no network, so it's instant.
 RANGES = {"1d": 1, "7d": 7, "14d": 14, "30d": 30, "90d": 90, "6m": 180, "1y": 365}
 row_l, row_r = st.columns([0.85, 0.15], vertical_alignment="center")
+# width="stretch": the buttons grow with the window instead of sitting small in
+# the corner on a wide screen. This is what the control already does on mobile —
+# it fills the width, which is why it reads well there. Left-aligned, not
+# centred, so its edge lines up with the hero, tiles and chart axis below.
 picked = row_l.segmented_control("Date range", list(RANGES), default="30d",
-                                 label_visibility="collapsed")
+                                 label_visibility="collapsed", width="stretch")
 days = RANGES.get(picked or "30d", 30)
 sync_now = row_r.button("⟳ Now", width="stretch",
                         help="Check Nightscout for new readings right now.")

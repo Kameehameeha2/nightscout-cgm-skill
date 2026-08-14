@@ -7,11 +7,18 @@
 # re-validate if you do.
 [theme]
 base = "dark"
-primaryColor = "#3987E5"              # series blue — accents, focus, buttons
+# Chrome accent (selected range button, primary buttons, focus rings). A deeper
+# step of the same blue ramp than the glucose line (#3987E5), so UI chrome never
+# impersonates a data mark. #256ABF is the only step clearing both gates:
+# 3.17:1 against the card behind it (WCAG 1.4.11 wants 3:1 for a component
+# boundary) and 5.39:1 for white label text on it. The lighter #3987E5 used
+# before only managed 3.64:1 for white labels; the deeper #1C5CAB dropped to
+# 2.58:1 on the boundary.
+primaryColor = "#256ABF"
 backgroundColor = "#0B1220"           # page plane
 secondaryBackgroundColor = "#131C2B"  # cards / chart surface
 textColor = "#F2F5FA"                 # primary ink
-font = "sans serif"
+font = "sans serif"                   # Streamlit's Source Sans — unchanged
 
 [server]
 # Reports can take a while (full-year fetch + Claude call); keep uploads modest.
