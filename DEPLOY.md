@@ -8,10 +8,18 @@ behind a password gate, reachable from any device.
 
 ## What the app does
 
-- **Refresh all history (1 click)** — fetches a full year from Nightscout into
-  the local SQLite DB, so every date range (1 day … 1 year) is instantly
-  available. It also auto-refreshes hourly and on cold start, so the app is
-  current whenever you open it.
+- **Stays current by itself.** A full year of history lives in a local SQLite
+  DB, so switching date range is a local query — instant, no network. Keeping it
+  current is *incremental*: on every page load the app asks Nightscout only for
+  readings newer than the newest one it already has (normally one small request
+  for a handful of readings), so opening the app shows current data. The
+  freshness line under the range bar says how old the newest reading is, and
+  **⟳ Now** tops up on demand.
+- **Rebuild full history** (Settings) re-fetches a whole year — ~105k readings
+  across ~11 requests. It's only needed when there's no local history to extend:
+  a first run, or after a Streamlit Cloud container restart, which wipes the
+  ephemeral disk and the database with it. That case is detected and handled
+  automatically on load.
 - **Generate full report (1 click)** — computes the AGP, hourly out-of-range,
   day×hour heatmap, and a **Loopalyzer average day** (glucose median/IQR +
   delivered vs. scheduled basal + boluses + carbs), then asks Claude to find the

@@ -51,6 +51,82 @@ def _api_root() -> str:
     return url.rstrip("/") + "/api/v1"
 
 
+def newest_reading_ms() -> int | None:
+    """Timestamp (ms) of the newest stored reading, or None if there are none."""
+    if not DB_PATH.exists():
+        return None
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
+        row = conn.execute("SELECT MAX(date_ms) FROM readings").fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    return row[0] if row and row[0] else None
+
+
+def sync_new_readings(max_pages: int = 4) -> dict:
+    """Top up the DB with only the readings newer than the newest stored one.
+
+    cgm.py's `refresh --days 365` always pages *backwards* from the newest entry
+    until it passes the cutoff, so it downloads a whole year (~105k readings,
+    ~11 requests) to discover the handful that are actually new. This asks
+    Nightscout for the gap instead — normally a single small request.
+
+    Returns one of:
+        {"status": "ok", "new": int, "latest_ms": int, "truncated": bool}
+        {"status": "backfill_needed", "reason": str}   → caller runs the full fetch
+        {"error": str}
+    """
+    if not os.environ.get("NIGHTSCOUT_URL"):
+        return {"error": "NIGHTSCOUT_URL is not set"}
+
+    latest = newest_reading_ms()
+    if latest is None:
+        # No DB or no rows: nothing to be incremental against. On Streamlit
+        # Cloud this is the normal cold start, since the container's disk is
+        # ephemeral and the database does not survive a restart.
+        return {"status": "backfill_needed",
+                "reason": "no local readings yet"}
+
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
+        before = conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0]
+        cursor_ms, truncated = latest, False
+        for page in range(max_pages):
+            try:
+                resp = requests.get(
+                    f"{_api_root()}/entries.json",
+                    params={"count": 10000, "find[date][$gte]": cursor_ms + 1},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                entries = resp.json()
+            except (requests.RequestException, ValueError) as e:
+                return {"error": f"Nightscout fetch failed: {e}"}
+
+            rows = [(e.get("_id"), e.get("sgv"), e.get("date"),
+                     e.get("dateString"), e.get("trend"), e.get("direction"),
+                     e.get("device"))
+                    for e in entries
+                    if e.get("type") == "sgv" and e.get("date") and e.get("_id")]
+            if rows:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO readings VALUES (?,?,?,?,?,?,?)", rows)
+                conn.commit()
+                cursor_ms = max(r[2] for r in rows)
+            if len(entries) < 10000:
+                break            # short page → we've caught up
+            if page == max_pages - 1:
+                truncated = True  # gap bigger than we'll pull in one go
+        after = conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0]
+    finally:
+        conn.close()
+
+    return {"status": "ok", "new": after - before,
+            "latest_ms": newest_reading_ms(), "truncated": truncated}
+
+
 def fetch_treatments(start: dt.datetime, end: dt.datetime) -> list[dict]:
     """Page treatments in [start, end) backwards by created_at (dedup by _id)."""
     root = _api_root()

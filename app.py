@@ -180,12 +180,47 @@ def load_readings(days: int, _db_mtime: float) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def auto_refresh(_bucket: str) -> tuple[int, str]:
-    """Fetch a full year of history. Cached for 1h so it runs at most hourly
-    and always on a cold start (empty DB), satisfying 'always current when I
-    open it' without a separate background worker."""
+def backfill_history(_bucket: str) -> tuple[int, str]:
+    """Fetch a full year — the expensive one (~105k readings, ~11 requests).
+
+    Only needed when there is no local history to build on: a first run, or a
+    Streamlit Cloud container restart, which wipes the ephemeral disk and takes
+    the database with it. Cached for an hour so a crash-loop can't hammer
+    Nightscout.
+    """
     proc = run_cgm("refresh", "--days", "365")
     return proc.returncode, (proc.stderr or proc.stdout).strip()[:800]
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def sync_recent(_bucket: str) -> dict:
+    """Top up with just the readings newer than the newest stored one.
+
+    Cheap enough (normally one small request for ~12 readings) to run on every
+    page load, so opening the app always shows current data instead of
+    something up to an hour stale. The 60s cache stops it firing again on every
+    button click within the same visit.
+    """
+    return analysis.sync_new_readings()
+
+
+@st.cache_data(show_spinner=False)
+def newest_reading(_db_mtime: float) -> pd.Timestamp | None:
+    """Timestamp of the newest stored reading, for the freshness indicator."""
+    ms = analysis.newest_reading_ms()
+    return pd.Timestamp(ms, unit="ms", tz="UTC") if ms else None
+
+
+def ago(ts: pd.Timestamp | None) -> str:
+    if ts is None:
+        return "no data yet"
+    mins = int((pd.Timestamp.now("UTC") - ts).total_seconds() // 60)
+    if mins < 2:
+        return "just now"
+    if mins < 60:
+        return f"{mins} min ago"
+    hrs = mins // 60
+    return f"{hrs} h ago" if hrs < 48 else f"{hrs // 24} days ago"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -296,9 +331,11 @@ with gear.popover("⚙️ Settings", width="stretch"):
         low_thr = st.number_input("Low limit", 40, 120, 70, 1)
         high_thr = st.number_input("High limit", 120, 300, 180, 1)
     st.divider()
-    do_refresh = st.button("🔄 Refresh all history", width="stretch",
-                           help="Fetches a full year from Nightscout so every "
-                                "date range is instantly available.")
+    do_backfill = st.button("🔄 Rebuild full history", width="stretch",
+                            help="Re-fetches a full year from Nightscout. Slow "
+                                 "(~105k readings) — only needed if history "
+                                 "looks incomplete. Normal updates are "
+                                 "incremental and automatic.")
 
 if low_thr >= high_thr:
     st.error("Low limit must be below the high limit — check Settings.")
@@ -308,37 +345,66 @@ if not os.environ.get("NIGHTSCOUT_URL"):
     st.warning("NIGHTSCOUT_URL is not set — add it to the app secrets. Data "
                "refresh and reports will fail until then.")
 
-if do_refresh:
-    with st.spinner("Fetching a full year of readings…"):
+def clear_data_caches() -> None:
+    load_readings.clear()
+    run_analysis.clear()
+    newest_reading.clear()
+
+
+if do_backfill:
+    with st.spinner("Re-fetching a full year of readings…"):
         proc = run_cgm("refresh", "--days", "365")
     if proc.returncode == 0:
-        load_readings.clear()
-        run_analysis.clear()
-        auto_refresh.clear()
-        st.success("All history refreshed.")
+        clear_data_caches()
+        backfill_history.clear()
+        sync_recent.clear()
+        st.success("Full history rebuilt.")
     else:
-        st.error("Refresh failed.")
+        st.error("Rebuild failed.")
         st.code((proc.stderr or proc.stdout).strip()[:1000])
 
 # Date range: presets in one row above everything they scope, so every number
-# on the page always describes the same slice.
+# on the page always describes the same slice. Switching range is a local SQL
+# query against history we already hold — no network, so it's instant.
 RANGES = {"1d": 1, "7d": 7, "14d": 14, "30d": 30, "90d": 90, "6m": 180, "1y": 365}
-picked = st.segmented_control("Date range", list(RANGES), default="30d",
-                              label_visibility="collapsed")
+row_l, row_r = st.columns([0.85, 0.15], vertical_alignment="center")
+picked = row_l.segmented_control("Date range", list(RANGES), default="30d",
+                                 label_visibility="collapsed")
 days = RANGES.get(picked or "30d", 30)
+sync_now = row_r.button("⟳ Now", width="stretch",
+                        help="Check Nightscout for new readings right now.")
 
-# Auto-refresh on load (cold start / hourly), non-fatal.
+# Keeping data current: an incremental top-up on every load (cheap), and a full
+# backfill only when there's no local history to extend.
 if os.environ.get("NIGHTSCOUT_URL"):
-    with st.spinner("Checking for new data…"):
-        rc, msg = auto_refresh("hourly")
-    if rc != 0 and not DB_PATH.exists():
-        st.error("Initial data fetch failed.")
-        st.code(msg)
+    if sync_now:
+        sync_recent.clear()
+        clear_data_caches()
+    with st.spinner("Checking for new readings…"):
+        res = sync_recent("tick")
+
+    if res.get("status") == "backfill_needed":
+        with st.spinner("First run here — fetching a year of history…"):
+            rc, msg = backfill_history("cold")
+        clear_data_caches()
+        if rc != 0:
+            st.error("Initial data fetch failed.")
+            st.code(msg)
+    elif res.get("error"):
+        st.warning(f"Could not reach Nightscout — showing stored data. "
+                   f"({res['error']})")
+    elif res.get("new"):
+        clear_data_caches()   # new rows landed; recompute against them
+        if res.get("truncated"):
+            st.info(f"Caught up {res['new']:,} readings — there may be more. "
+                    "Press ⟳ again, or rebuild full history in Settings.")
 
 
 # --------------------------------------------------------------------------- #
 # Header + KPIs + glucose chart
 # --------------------------------------------------------------------------- #
+st.caption(f"🕒 Latest reading {ago(newest_reading(db_mtime()))}")
+
 df = load_readings(days, db_mtime())
 if df.empty:
     st.warning("No readings in the local database yet. Open **⚙️ Settings → "
