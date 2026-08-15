@@ -38,6 +38,14 @@ nightscout_report.html
 nightscout_agp_report.html
 coverage.json
 
+# Trio / pump settings exports (personal therapy settings — keep OUT of git).
+# This repo is public; a settings export dropped here must never be committed.
+*.xlsx
+*.xls
+*.csv
+trio_export*
+trio_settings*.json
+
 # Generated analysis artifacts (health-derived data — keep OUT of git)
 full_analysis.json
 treatments_agg.json
