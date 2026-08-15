@@ -102,7 +102,8 @@ def style_fig(fig, height: int, ylab: str | None = None, legend: bool = False,
 # --------------------------------------------------------------------------- #
 def _load_secrets() -> None:
     for key in ("NIGHTSCOUT_URL", "ANTHROPIC_API_KEY", "REPORT_MODEL",
-                "REPORT_EFFORT", "DISPLAY_UNITS", "APP_PASSWORD"):
+                "REPORT_EFFORT", "DISPLAY_UNITS", "APP_PASSWORD",
+                "TRIO_SETTINGS"):
         try:
             if key in st.secrets and st.secrets[key]:
                 # strip(): a trailing newline/space pasted into the Secrets box
@@ -397,9 +398,19 @@ with gear.popover("⚙️ Settings", width="stretch"):
             st.caption("Streamlit Cloud wipes local files when the container "
                        "restarts. To keep these settings for good, paste this "
                        "into App settings → Secrets:")
-            st.code('TRIO_SETTINGS = """'
-                    + json.dumps(stored["settings"], indent=1) + '"""',
-                    language="toml")
+            # A TOML *literal* string ('''), and no \\u escaping. TOML's basic
+            # multi-line string ("""" ) processes escapes, and json.dumps writes
+            # non-BMP characters — emoji in preset names — as surrogate pairs,
+            # which are not valid Unicode scalar values: "please enter valid
+            # TOML". Literal strings process nothing, so raw UTF-8 is safe.
+            toml_blob = ("TRIO_SETTINGS = '''\n"
+                         + json.dumps(stored["settings"], indent=1,
+                                      ensure_ascii=False)
+                         + "\n'''")
+            st.code(toml_blob, language="toml")
+            st.download_button("Download as secrets.toml", toml_blob,
+                               file_name="trio_secrets.toml",
+                               mime="text/plain", width="stretch")
             if st.button("Remove stored settings", width="stretch"):
                 trio_settings.clear()
                 run_analysis.clear()
