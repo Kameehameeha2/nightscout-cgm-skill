@@ -39,6 +39,10 @@ def _clean(value):
     """Normalise a cell to something JSON-serialisable and compact."""
     if value is None:
         return None
+    # pandas fills blank cells with float NaN, which is numeric — so this test
+    # has to come before the numeric branch or empty cells arrive as "nan".
+    if isinstance(value, float) and value != value:
+        return None
     if isinstance(value, (int, float, bool)):
         return value
     if isinstance(value, (dt.date, dt.time, dt.datetime)):
@@ -68,6 +72,52 @@ def _flatten(obj, prefix: str = "") -> dict:
         if cleaned is not None:
             out[prefix] = cleaned
     return out
+
+
+_VALUE_COLS = {"value", "waarde", "setting value", "val"}
+_UNIT_COLS = {"unit", "units", "eenheid"}
+
+
+def _named_export(df) -> dict | None:
+    """Parse an export with real column headers and a Value column.
+
+    Trio's own CSV looks like:
+        Setting Category,Subcategory,Setting Name,Value,Unit
+        Algorithm,Dynamic Settings,Sigmoid Adjustment Factor,80,%
+    Everything left of Value becomes a dotted key and Unit is appended to the
+    value, so the model reads
+    "Algorithm.Dynamic Settings.Sigmoid Adjustment Factor = 80 %".
+    Returns None when there's no Value column, so callers can fall back.
+    """
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    value_col = next((cols[k] for k in _VALUE_COLS if k in cols), None)
+    if value_col is None:
+        return None
+    unit_col = next((cols[k] for k in _UNIT_COLS if k in cols), None)
+    key_cols = [c for c in df.columns if c not in (value_col, unit_col)]
+    if not key_cols:
+        return None
+
+    out: dict = {}
+    for row in df.to_dict(orient="records"):
+        parts = [str(_clean(row[c])) for c in key_cols if _clean(row[c]) is not None]
+        value = _clean(row[value_col])
+        if not parts or value is None:
+            continue
+        if unit_col is not None:
+            unit = _clean(row[unit_col])
+            if unit:
+                value = f"{value} {unit}"
+        key = ".".join(parts)
+        # Repeated keys (two presets sharing a name) get suffixed rather than
+        # silently overwriting each other.
+        if key in out and out[key] != value:
+            n = 2
+            while f"{key}#{n}" in out:
+                n += 1
+            key = f"{key}#{n}"
+        out[key] = value
+    return out or None
 
 
 def _from_frame(df, sheet: str) -> dict:
@@ -118,15 +168,29 @@ def parse_upload(filename: str, data: bytes) -> dict:
     try:
         if name.endswith(".json"):
             settings = _flatten(json.loads(data.decode("utf-8")))
-        elif name.endswith(".csv"):
+        elif name.endswith((".csv", ".xlsx", ".xls")):
             import pandas as pd
-            settings = _from_frame(pd.read_csv(io.BytesIO(data), header=None), "")
-        elif name.endswith((".xlsx", ".xls")):
-            import pandas as pd
-            sheets = pd.read_excel(io.BytesIO(data), sheet_name=None, header=None)
+            # Read WITH a header row first: Trio's export is a named table
+            # (Setting Category, Subcategory, Setting Name, Value, Unit), and
+            # header=None would turn those names into a data row.
+            if name.endswith(".csv"):
+                frames = {"": pd.read_csv(io.BytesIO(data))}
+            else:
+                frames = pd.read_excel(io.BytesIO(data), sheet_name=None)
             settings = {}
-            for sheet, df in sheets.items():
-                settings.update(_from_frame(df, str(sheet)))
+            for sheet, df in frames.items():
+                named = _named_export(df)
+                if named:
+                    settings.update(named)
+                    continue
+                # No Value column, so the header guess was probably wrong —
+                # re-read headerless and treat it as key/value pairs or rows.
+                if name.endswith(".csv"):
+                    raw = pd.read_csv(io.BytesIO(data), header=None)
+                else:
+                    raw = pd.read_excel(io.BytesIO(data), sheet_name=sheet,
+                                        header=None)
+                settings.update(_from_frame(raw, str(sheet)))
         else:
             return {"error": f"Unsupported file type: {filename}"}
     except ImportError:
