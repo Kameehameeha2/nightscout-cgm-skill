@@ -47,9 +47,19 @@ DEFAULT_THERAPY_CONTEXT = (
 
 SYSTEM_PROMPT = """You are a diabetes data analyst producing a written report from a person's \
 own Nightscout CGM + pump/treatment history. You are given already-computed \
-statistics (never raw readings) and their live pump profile.
+statistics (never raw readings), their live pump profile, and — when they have \
+exported it — `trio_settings`, the full set of preferences from the loop app \
+itself (Nightscout does not receive these, so they are absent otherwise).
 
 Hard rules:
+- NEVER state, assume, or reason from a numeric value for a setting that is not \
+present in the JSON you were given. Nightscout carries the profile (basal, ISF, \
+carb ratios, targets) but NOT the algorithm preferences — dynISF \
+adjustmentFactor, SMB and UAM limits, maxUAMSMBBasalMinutes, thresholds. If \
+`trio_settings` is absent or lacks a setting you would want, say plainly that it \
+was not provided and ask for it; naming a lever is fine, inventing its current \
+value is not. When `trio_settings` IS present, use those actual values and quote \
+them.
 - This is a DATA-PATTERN ANALYSIS of past readings, not medical advice. Say so \
 once, near the top. Settings changes must be made only with their care team, \
 one variable at a time, re-assessed over 1–2 weeks, and any low treated first.
@@ -93,6 +103,9 @@ def _context_payload(analysis: dict, therapy_context: str) -> str:
         "insulin_summary": analysis.get("insulin"),
         "announced_vs_unannounced_dinner": analysis.get("dinner"),
         "pump_profile": analysis.get("profile"),
+        # Exported Trio preferences (dynISF adjustmentFactor, SMB/UAM limits…).
+        # Nightscout never sees these, so they're absent unless supplied.
+        "trio_settings": analysis.get("trio_settings"),
     }
     # drop empty keys so the model isn't distracted by nulls
     payload = {k: v for k, v in payload.items() if v not in (None, {}, [])}

@@ -26,6 +26,7 @@ Run locally:  python -m streamlit run app.py
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -117,6 +118,7 @@ _load_secrets()
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 import analysis  # noqa: E402
 import report_ai  # noqa: E402
+import trio_settings  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -350,7 +352,7 @@ def tile(label: str, value: str, icon: str = "", color: str | None = None,
 # --------------------------------------------------------------------------- #
 # Top bar — title, settings, and the single filter row that scopes the page
 # --------------------------------------------------------------------------- #
-head, gear = st.columns([0.74, 0.26], vertical_alignment="center")
+head, gear = st.columns([0.86, 0.14], vertical_alignment="center")
 head.markdown("## 🩸 Glucose")
 
 with gear.popover("⚙️ Settings", width="stretch"):
@@ -364,6 +366,45 @@ with gear.popover("⚙️ Settings", width="stretch"):
     else:
         low_thr = st.number_input("Low limit", 40, 120, 70, 1)
         high_thr = st.number_input("High limit", 120, 300, 180, 1)
+    st.divider()
+    # Trio uploads its profile to Nightscout but not its preferences (dynISF
+    # adjustmentFactor, SMB/UAM limits…), so the report can't see them unless
+    # they're supplied here.
+    st.caption("Trio settings")
+    stored = trio_settings.load()
+    if stored:
+        when = (stored.get("updated_at") or "")[:10]
+        st.success(f"{len(stored['settings'])} settings loaded "
+                   f"from {stored['source']}{' · ' + when if when else ''}")
+    else:
+        st.info("Not supplied — the report will say so rather than guess.")
+    upload = st.file_uploader("Trio settings export",
+                             type=["xlsx", "xls", "csv", "json"],
+                             label_visibility="collapsed",
+                             help="Export your settings from Trio and drop the "
+                                  "file here. Everything in it is passed to the "
+                                  "report, so the analysis sees actual values.")
+    if upload is not None:
+        parsed = trio_settings.parse_upload(upload.name, upload.getvalue())
+        if parsed.get("error"):
+            st.error(parsed["error"])
+        elif stored is None or parsed["settings"] != stored.get("settings"):
+            trio_settings.store(parsed["settings"], upload.name)
+            run_analysis.clear()
+            st.rerun()
+    if stored:
+        with st.expander("Make it permanent / remove"):
+            st.caption("Streamlit Cloud wipes local files when the container "
+                       "restarts. To keep these settings for good, paste this "
+                       "into App settings → Secrets:")
+            st.code('TRIO_SETTINGS = """'
+                    + json.dumps(stored["settings"], indent=1) + '"""',
+                    language="toml")
+            if st.button("Remove stored settings", width="stretch"):
+                trio_settings.clear()
+                run_analysis.clear()
+                st.rerun()
+
     st.divider()
     do_backfill = st.button("🔄 Rebuild full history", width="stretch",
                             help="Re-fetches a full year from Nightscout. Slow "
@@ -401,7 +442,9 @@ if do_backfill:
 # on the page always describes the same slice. Switching range is a local SQL
 # query against history we already hold — no network, so it's instant.
 RANGES = {"1d": 1, "7d": 7, "14d": 14, "30d": 30, "90d": 90, "6m": 180, "1y": 365}
-row_l, row_r = st.columns([0.85, 0.15], vertical_alignment="center")
+# Narrow action columns: a stretched button in a wide column balloons to a slab
+# that dwarfs the compact range control beside it.
+row_l, row_r = st.columns([0.9, 0.1], vertical_alignment="center")
 # Natural width, left-aligned — the size comes from the CSS padding above rather
 # than from stretching across the page. Add width="stretch" here to go full-width
 # again if that reads better on a big monitor.
@@ -700,6 +743,12 @@ st.caption("One click: computes the AGP, hourly out-of-range, day×hour heatmap,
 if st.button("Generate full report", type="primary", width="stretch"):
     with st.spinner("Computing analysis (glucose + treatments + Loopalyzer)…"):
         result = run_analysis(days, db_mtime(), str(load_profile("hourly").get("units")))
+
+    # Hand the report the exported Trio preferences alongside the computed
+    # stats, so it reasons about real values instead of naming levers blind.
+    trio = trio_settings.load()
+    if trio:
+        result["trio_settings"] = trio["settings"]
 
     if result.get("error"):
         st.error(result["error"])
