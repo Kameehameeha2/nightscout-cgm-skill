@@ -313,23 +313,25 @@ st.markdown(f"""
     font-weight: 600;
     padding: 0.5rem 1.15rem;
   }}
-  div[data-testid="stButtonGroup"] button[kind="segmented_control"],
-  div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_control"] {{
-    color: {INK_DIM};
-  }}
-  /* !important is load-bearing here: Streamlit's own emotion classes are more
-     specific than these attribute selectors and otherwise win the cascade.
-     The descendant rule catches the label whether it renders as p, span or div. */
-  div[data-testid="stButtonGroup"] button[kind="segmented_controlActive"],
-  div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] {{
+  /* The selected option is identified by aria-checked, NOT by a kind= or
+     data-testid= attribute — those exist as strings in Streamlit's bundle but
+     are not emitted onto these buttons, so selectors built on them match
+     nothing. Verified by reading the live DOM with a headless browser.
+     Streamlit's own default is accent-coloured label text on a 10% tint, which
+     leaves the selected item lower-contrast than its unselected neighbours;
+     fill it and force the label white instead. The label renders as a div, so
+     the descendant rule uses *. */
+  div[data-testid="stButtonGroup"] button[aria-checked="true"] {{
     background: {ACCENT} !important;
     border-color: {ACCENT} !important;
     color: #FFFFFF !important;
   }}
-  div[data-testid="stButtonGroup"] button[kind="segmented_controlActive"] *,
-  div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] * {{
+  div[data-testid="stButtonGroup"] button[aria-checked="true"] * {{
     color: #FFFFFF !important;
     fill: #FFFFFF !important;
+  }}
+  div[data-testid="stButtonGroup"] button[aria-checked="false"] * {{
+    color: {INK_DIM} !important;
   }}
 </style>
 """, unsafe_allow_html=True)
