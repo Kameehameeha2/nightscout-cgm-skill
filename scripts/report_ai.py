@@ -37,12 +37,14 @@ EFFORT = os.environ.get("REPORT_EFFORT", "high")
 # suggesting manual-bolus / standard-pump advice that doesn't apply.
 DEFAULT_THERAPY_CONTEXT = (
     "The person runs a fully automated closed loop (Trio on iPhone, oref-style "
-    "algorithm with Dynamic ISF + UAM). They do NOT give manual boluses — the "
-    "algorithm delivers everything via SMBs. DIA of 10 h and an insulin peak "
-    "time around 50 min are correct for their fast insulin (Lyumjev) and are "
-    "NOT levers to change. Only discuss algorithm/profile settings that fit a "
-    "full closed loop (basal shape, ISF, carb ratios, targets, dynISF "
-    "adjustmentFactor, UAM/SMB limits, temp targets, advance carb announcement)."
+    "algorithm with Dynamic ISF + UAM) on Lyumjev. They do NOT give manual "
+    "boluses — the algorithm delivers everything via SMBs. Their DIA and custom "
+    "insulin peak time are deliberate, chosen for an ultra-rapid insulin in the "
+    "oref model; read the actual values from trio_settings rather than assuming "
+    "them, and do not propose shortening DIA below the 8-10 h the oref curve "
+    "expects. Only discuss algorithm/profile settings that fit a full closed "
+    "loop (basal shape, ISF, carb ratios, targets, dynISF adjustment factor, "
+    "UAM/SMB limits, temp targets, override presets, advance carb announcement)."
 )
 
 SYSTEM_PROMPT = """You are a diabetes data analyst producing a written report from a person's \
@@ -230,3 +232,113 @@ def _bad_key_message() -> str:
         "has credit.\n\n"
         "Saving Secrets restarts the app; the report works on the next click."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Follow-up chat about a generated report
+# --------------------------------------------------------------------------- #
+CHAT_SYSTEM = """You are discussing a CGM/pump data report that you wrote for this \
+person, from their own Nightscout history and their exported loop settings. Both \
+the computed analysis and the report itself are given to you below.
+
+Answer their follow-up questions about it. Same hard rules as the report:
+- NEVER state, assume, or reason from a numeric value for a setting that is not \
+in the analysis JSON. If they ask about something you weren't given, say so and \
+ask them to supply it — naming a lever is fine, inventing its current value is \
+not.
+- This is a data-pattern analysis of past readings, not medical advice. Any \
+settings change is for them and their care team, one variable at a time, \
+re-assessed over 1–2 weeks.
+- They run a fully automated closed loop and do NOT give manual boluses or \
+corrections. Never suggest manual dosing, pre-bolusing or split boluses; discuss \
+only algorithm and profile settings.
+- Hypoglycemia is the binding safety constraint. Judge every idea by whether it \
+pushes lows up, and say so when it does.
+- Be quantitative and cite the actual numbers from the analysis. If the data \
+cannot answer the question, say that plainly instead of speculating.
+
+Style: this is a conversation, not a report. Answer the question directly and \
+concisely, lead with the answer, and don't restate the whole report or re-run \
+its disclaimers every turn. Markdown is fine; keep it light."""
+
+
+def context_payload(analysis: dict, therapy_context: str | None = None) -> str:
+    """The exact JSON a report was written from — stored so chat can reuse it."""
+    return _context_payload(analysis, therapy_context or DEFAULT_THERAPY_CONTEXT)
+
+
+class ChatStream:
+    """Streams one assistant reply in a follow-up conversation.
+
+    Iterating yields text chunks for st.write_stream; `ok`, `text` and `error`
+    are populated by the time iteration ends. The analysis + report block is
+    marked for prompt caching, so every follow-up re-reads that prefix at about
+    a tenth of the input cost instead of paying for it again.
+    """
+
+    def __init__(self, question: str, history: list[dict], context_json: str,
+                 report_md: str, model: str | None = None):
+        self.question = question
+        self.history = history or []
+        self.context_json = context_json
+        self.report_md = report_md
+        self.model = model or DEFAULT_MODEL
+        self.ok = False
+        self.text = ""
+        self.error = None
+
+    def __iter__(self):
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            self.error = "ANTHROPIC_API_KEY not set"
+            yield "No Anthropic API key is configured, so chat is unavailable."
+            return
+        try:
+            import anthropic
+        except ImportError:
+            self.error = "The `anthropic` package is not installed."
+            return
+
+        context_block = (
+            "Here is the analysis the report was written from, and the report "
+            "itself.\n\n<analysis_json>\n" + self.context_json +
+            "\n</analysis_json>\n\n<report>\n" + self.report_md + "\n</report>"
+        )
+        messages = [{"role": m["role"], "content": m["content"]}
+                    for m in self.history if m.get("role") in ("user", "assistant")]
+        messages.append({"role": "user", "content": self.question})
+
+        parts: list[str] = []
+        try:
+            client = anthropic.Anthropic()
+            with client.messages.stream(
+                model=self.model,
+                max_tokens=MAX_TOKENS,
+                output_config={"effort": EFFORT},
+                system=[
+                    {"type": "text", "text": CHAT_SYSTEM},
+                    # Cached: the analysis and report don't change between turns.
+                    {"type": "text", "text": context_block,
+                     "cache_control": {"type": "ephemeral"}},
+                ],
+                messages=messages,
+            ) as stream:
+                for chunk in stream.text_stream:
+                    parts.append(chunk)
+                    yield chunk
+                final = stream.get_final_message()
+        except anthropic.AuthenticationError:
+            self.error = "Anthropic rejected the API key (401)."
+            yield "\n\n*The API key was rejected — see Settings.*"
+            return
+        except anthropic.APIError as e:
+            self.error = f"Claude API error: {e}"
+            self.text = "".join(parts)
+            return
+
+        self.text = "".join(parts).strip()
+        if final.stop_reason == "refusal":
+            self.error = "The request was declined by the model's safety system."
+            return
+        self.ok = bool(self.text)
+        if not self.ok:
+            self.error = "Empty response from the model."

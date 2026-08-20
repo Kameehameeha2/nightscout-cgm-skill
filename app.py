@@ -11,16 +11,20 @@ What it does
   Time-in-Range figure, status tiles, and an interactive Plotly glucose chart.
   Long ranges aggregate to a median + IQR band, because a month of 5-minute
   readings overplots into an unreadable scribble.
-- One "Generate full report" button runs the whole pipeline inline: computes
-  the analysis (AGP, hourly out-of-range, day×hour heatmap, Loopalyzer average
-  day), then asks Claude to find patterns, check them against your live Trio
-  profile, and suggest cautious settings experiments.
+- One "Generate full report" button runs the whole pipeline: computes the
+  analysis (AGP, hourly out-of-range, day×hour heatmap, Loopalyzer average day),
+  then asks Claude to find patterns, check them against the live Trio profile
+  and the exported Trio settings, and suggest cautious settings experiments.
+- A chat below the report, so follow-up questions are answered against the same
+  statistics, settings and report text. Report and conversation are persisted
+  (chat_store) because Streamlit reruns the script on every interaction.
 
 Secrets (Streamlit Cloud → App settings → Secrets, or a local
 .streamlit/secrets.toml):
     NIGHTSCOUT_URL   = "https://your-site/api/v1/entries.json"
-    ANTHROPIC_API_KEY = "sk-ant-..."     # enables the AI report section
+    ANTHROPIC_API_KEY = "sk-ant-..."     # enables the report + chat
     APP_PASSWORD     = "something-strong" # gates the app (recommended in cloud)
+    TRIO_SETTINGS    = '''{...}'''        # optional: exported Trio settings
 
 Run locally:  python -m streamlit run app.py
 """
@@ -119,6 +123,7 @@ _load_secrets()
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 import analysis  # noqa: E402
 import report_ai  # noqa: E402
+import chat_store  # noqa: E402
 import trio_settings  # noqa: E402
 
 
@@ -751,15 +756,39 @@ st.caption("One click: computes the AGP, hourly out-of-range, day×hour heatmap,
            "them against your Trio settings, and suggest what to discuss with your "
            "care team.")
 
-if st.button("Generate full report", type="primary", width="stretch"):
-    with st.spinner("Computing analysis (glucose + treatments + Loopalyzer)…"):
-        result = run_analysis(days, db_mtime(), str(load_profile("hourly").get("units")))
+def report_charts(result: dict) -> None:
+    """The four report figures. Re-rendered on every rerun from cached analysis,
+    so they survive a chat message the same way the report text does."""
+    st.markdown("#### Ambulatory Glucose Profile (AGP)")
+    render_agp(result["hours"])
+    st.markdown("#### Time out of range, by hour")
+    render_hourly_oor(result["hours"])
+    st.markdown("#### Where trouble clusters — day × hour")
+    render_heatmap(result["heat"])
+    st.markdown("#### Loopalyzer — your average day")
+    if result.get("loopalyzer"):
+        render_loopalyzer(result["loopalyzer"])
+    else:
+        st.info("Loopalyzer needs treatment data, which couldn't be fetched.")
 
-    # Hand the report the exported Trio preferences alongside the computed
-    # stats, so it reasons about real values instead of naming levers blind.
+
+def analysis_for_report(n_days: int) -> dict:
+    """Cached analysis with the exported Trio preferences folded in, so the
+    report reasons about real setting values instead of naming levers blind."""
+    result = run_analysis(n_days, db_mtime(),
+                          str(load_profile("hourly").get("units")))
     trio = trio_settings.load()
-    if trio:
+    if trio and not result.get("error"):
         result["trio_settings"] = trio["settings"]
+    return result
+
+
+saved = chat_store.load_report()
+generate = st.button("Generate full report", type="primary", width="stretch")
+
+if generate:
+    with st.spinner("Computing analysis (glucose + treatments + Loopalyzer)…"):
+        result = analysis_for_report(days)
 
     if result.get("error"):
         st.error(result["error"])
@@ -772,17 +801,7 @@ if st.button("Generate full report", type="primary", width="stretch"):
             st.info("Analysed the glucose data. (Trio profile unavailable — the "
                     "settings check will be limited.)")
 
-        st.markdown("#### Ambulatory Glucose Profile (AGP)")
-        render_agp(result["hours"])
-        st.markdown("#### Time out of range, by hour")
-        render_hourly_oor(result["hours"])
-        st.markdown("#### Where trouble clusters — day × hour")
-        render_heatmap(result["heat"])
-        st.markdown("#### Loopalyzer — your average day")
-        if result.get("loopalyzer"):
-            render_loopalyzer(result["loopalyzer"])
-        else:
-            st.info("Loopalyzer needs treatment data, which couldn't be fetched.")
+        report_charts(result)
 
         st.markdown("#### Analysis & settings suggestions")
         st.caption("Data-pattern analysis, not medical advice. Discuss any change "
@@ -794,5 +813,58 @@ if st.button("Generate full report", type="primary", width="stretch"):
             st.write_stream(ai)
         if ai.ok:
             st.caption(f"Generated by {ai.model}.")
+            # Persist the report and the exact context it was written from: a
+            # chat message reruns the script, and anything held only in a local
+            # variable would be gone. A new report starts a fresh conversation.
+            chat_store.save_report(days, report_ai.context_payload(result),
+                                   ai.markdown)
+            chat_store.clear_messages()
+            saved = chat_store.load_report()
         else:
             st.warning(ai.error or "AI report unavailable.")
+
+elif saved:
+    # Re-render the stored report so it survives reruns and page refreshes.
+    st.caption(f"Report for the last {saved['days']} days · generated "
+               f"{saved['created_at'].replace('T', ' ')} UTC")
+    result = analysis_for_report(saved["days"])
+    if not result.get("error"):
+        report_charts(result)
+    st.markdown("#### Analysis & settings suggestions")
+    st.markdown(saved["report_md"])
+
+
+# --------------------------------------------------------------------------- #
+# Ask about the report
+# --------------------------------------------------------------------------- #
+if saved:
+    st.divider()
+    st.subheader("💬 Ask about this report")
+    st.caption("Claude sees the same statistics, your Trio settings and the "
+               "report above, so follow-ups are answered from your actual "
+               "numbers. Kept until you generate a new report.")
+
+    messages = chat_store.load_messages()
+    for msg in messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    question = st.chat_input("e.g. why is the overnight window the risk, not the evening?")
+    if question:
+        with st.chat_message("user"):
+            st.markdown(question)
+        with st.chat_message("assistant"):
+            reply = report_ai.ChatStream(question, messages,
+                                         saved["context_json"], saved["report_md"])
+            with st.spinner("Thinking…"):
+                st.write_stream(reply)
+        if reply.ok:
+            chat_store.save_messages(messages
+                                     + [{"role": "user", "content": question},
+                                        {"role": "assistant", "content": reply.text}])
+        else:
+            st.warning(reply.error or "Chat unavailable.")
+
+    if messages and st.button("Clear conversation"):
+        chat_store.clear_messages()
+        st.rerun()
