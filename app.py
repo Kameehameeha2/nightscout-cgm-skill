@@ -126,6 +126,21 @@ import report_ai  # noqa: E402
 import chat_store  # noqa: E402
 import trio_settings  # noqa: E402
 
+# Streamlit adds scripts/ to sys.path at runtime, so its module watcher does not
+# always treat these as watched dependencies: after a deploy it can re-run the
+# new app.py while keeping an OLD report_ai cached in sys.modules. Probe for what
+# this build needs instead of crashing on a missing attribute, and tell the user
+# the actual remedy (a reboot, not a rerun).
+CHAT_AVAILABLE = hasattr(report_ai, "ChatStream")
+
+
+def report_context(result: dict) -> str:
+    """The JSON the report was written from, via whichever API this build has."""
+    fn = getattr(report_ai, "context_payload", None)
+    if fn is not None:
+        return fn(result)
+    return report_ai._context_payload(result, report_ai.DEFAULT_THERAPY_CONTEXT)
+
 
 # --------------------------------------------------------------------------- #
 # Password gate (optional — only if APP_PASSWORD is set)
@@ -816,10 +831,15 @@ if generate:
             # Persist the report and the exact context it was written from: a
             # chat message reruns the script, and anything held only in a local
             # variable would be gone. A new report starts a fresh conversation.
-            chat_store.save_report(days, report_ai.context_payload(result),
-                                   ai.markdown)
-            chat_store.clear_messages()
-            saved = chat_store.load_report()
+            # The report is already on screen and already cost an API call —
+            # a storage failure must never take it away.
+            try:
+                chat_store.save_report(days, report_context(result), ai.markdown)
+                chat_store.clear_messages()
+                saved = chat_store.load_report()
+            except Exception as e:                       # noqa: BLE001
+                st.warning(f"The report is shown above but could not be saved "
+                           f"for follow-up questions: {e}")
         else:
             st.warning(ai.error or "AI report unavailable.")
 
@@ -837,7 +857,12 @@ elif saved:
 # --------------------------------------------------------------------------- #
 # Ask about the report
 # --------------------------------------------------------------------------- #
-if saved:
+if saved and not CHAT_AVAILABLE:
+    st.divider()
+    st.info("Chat needs a restart to load: **Manage app → ⋮ → Reboot app**. "
+            "(A rerun keeps the previously imported modules in memory.)")
+
+if saved and CHAT_AVAILABLE:
     st.divider()
     st.subheader("💬 Ask about this report")
     st.caption("Claude sees the same statistics, your Trio settings and the "
